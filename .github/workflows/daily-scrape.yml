@@ -23,7 +23,7 @@ jobs:
           REPORTER_NOTION_TOKEN: ${{ secrets.REPORTER_NOTION_TOKEN }}
           REPORTER_SLACK_APP_TOKEN: ${{ secrets.REPORTER_SLACK_APP_TOKEN }}
           REPORTER_SLACK_CHANNEL: ${{ secrets.REPORTER_SLACK_CHANNEL }}
-        run: >-
+        run: |
           ARGS=""
           if [ "${{ inputs.skip-update }}" = "true" ]; then
             ARGS="--skip-update"
