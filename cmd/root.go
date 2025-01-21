@@ -158,12 +158,16 @@ func NewRootCmd() (*cobra.Command, error) {
 			ctx := cmd.Context()
 			logger := ctx.Value(configs.ContextKeyLogger).(*slog.Logger)
 			database := ctx.Value(configs.ContextKeyDB).(*database.NotionDB)
+			clientType := configs.ClientTypeFromString(flags.Client)
+			if clientType == configs.ClientTypeUnknown {
+				return fmt.Errorf("invalid client: %s", flags.Client)
+			}
 
 			// Updating data
 			if !flags.SkipUpdate {
 				logger.Info("Scanning client nodes")
 				source := ctx.Value(configs.ContextKeySource).(datasources.DataSource)
-				clientData, err := source.GetClientData(flags.Client)
+				clientData, err := source.GetClientData(clientType)
 				if err != nil {
 					return err
 				}

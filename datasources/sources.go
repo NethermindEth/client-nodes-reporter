@@ -29,5 +29,5 @@ func (c ClientData) Compare(other ClientData) int {
 type DataSource interface {
 	SourceName() string
 	SourceType() DataSourceType
-	GetClientData(clientName string) (ClientData, error)
+	GetClientData(clientName configs.ClientType) (ClientData, error)
 }
