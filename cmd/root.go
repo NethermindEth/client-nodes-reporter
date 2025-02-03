@@ -156,6 +156,7 @@ func NewRootCmd() (*cobra.Command, error) {
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+			source := ctx.Value(configs.ContextKeySource).(datasources.DataSource)
 			logger := ctx.Value(configs.ContextKeyLogger).(*slog.Logger)
 			database := ctx.Value(configs.ContextKeyDB).(*database.NotionDB)
 			clientType := configs.ClientTypeFromString(flags.Client)
@@ -166,7 +167,6 @@ func NewRootCmd() (*cobra.Command, error) {
 			// Updating data
 			if !flags.SkipUpdate {
 				logger.Info("Scanning client nodes")
-				source := ctx.Value(configs.ContextKeySource).(datasources.DataSource)
 				clientData, err := source.GetClientData(clientType)
 				if err != nil {
 					return err
@@ -196,8 +196,13 @@ func NewRootCmd() (*cobra.Command, error) {
 				return fmt.Errorf("failed to get historical data: %w", err)
 			}
 
-			notifier := ctx.Value(configs.ContextKeyNotifier).(*notifier.SlackNotifier)
-			if err := notifier.SendReport(historicalData); err != nil {
+			slackNotifier := ctx.Value(configs.ContextKeyNotifier).(*notifier.SlackNotifier)
+			if err := slackNotifier.SendReport(
+				notifier.NotifierReport{
+					SourceName: source.SourceName(),
+					ClientData: historicalData,
+				},
+			); err != nil {
 				return fmt.Errorf("failed to send report: %w", err)
 			}
 

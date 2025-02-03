@@ -34,7 +34,10 @@ type QuickChart struct {
 	Options QuickChartOptions `json:"options"`
 }
 
-func BuildQuickChart(data []datasources.ClientData) (string, error) {
+func BuildQuickChart(
+	source string,
+	data []datasources.ClientData,
+) (string, error) {
 	allNodes := make([]string, len(data))
 	syncedNodes := make([]string, len(data))
 	dates := make([]string, len(data))
@@ -51,11 +54,11 @@ func BuildQuickChart(data []datasources.ClientData) (string, error) {
 			Labels: dates,
 			Datasets: []QuickChartDataset{
 				{
-					Label: "All Nodes",
+					Label: fmt.Sprintf("All Nodes (%s)", source),
 					Data:  allNodes,
 				},
 				{
-					Label: "Synced Nodes",
+					Label: fmt.Sprintf("Synced Nodes (%s)", source),
 					Data:  syncedNodes,
 				},
 			},

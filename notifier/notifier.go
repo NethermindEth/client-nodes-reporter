@@ -9,6 +9,11 @@ import (
 	"github.com/slack-go/slack"
 )
 
+type NotifierReport struct {
+	SourceName string
+	ClientData []datasources.ClientData
+}
+
 type SlackNotifierOptions struct {
 	Token   string
 	Channel string
@@ -38,12 +43,12 @@ func (n *SlackNotifier) buildChangeMsg(change int64) string {
 	}
 }
 
-func (n *SlackNotifier) SendReport(data []datasources.ClientData) error {
-	slices.SortFunc(data, datasources.ClientData.Compare)
-	lastUpdate := data[len(data)-1]
+func (n *SlackNotifier) SendReport(report NotifierReport) error {
+	slices.SortFunc(report.ClientData, datasources.ClientData.Compare)
+	lastUpdate := report.ClientData[len(report.ClientData)-1]
 	client := lastUpdate.ClientName.String()
 
-	report := fmt.Sprintf(
+	reportMsg := fmt.Sprintf(
 		"Today there are *%d* | *%.2f%%* %s nodes from which *%d* | *%.2f%%* are synced(*%.2f%%*)!",
 		lastUpdate.ClientTotal,
 		(float64(lastUpdate.ClientTotal)*100)/float64(lastUpdate.Total),
@@ -53,21 +58,21 @@ func (n *SlackNotifier) SendReport(data []datasources.ClientData) error {
 		(float64(lastUpdate.ClientSynced)*100)/float64(lastUpdate.ClientTotal),
 	)
 
-	if len(data) > 1 {
-		previousUpdate := data[len(data)-2]
+	if len(report.ClientData) > 1 {
+		previousUpdate := report.ClientData[len(report.ClientData)-2]
 
 		totalChange := lastUpdate.ClientTotal - previousUpdate.ClientTotal
 		SyncedChange := lastUpdate.ClientSynced - previousUpdate.ClientSynced
 
-		report += "\n"
-		report += fmt.Sprintf(
+		reportMsg += "\n"
+		reportMsg += fmt.Sprintf(
 			"The number of all nodes is %s and synced nodes are %s",
 			n.buildChangeMsg(totalChange),
 			n.buildChangeMsg(SyncedChange),
 		)
 	}
 
-	quickChart, err := BuildQuickChart(data)
+	quickChart, err := BuildQuickChart(report.SourceName, report.ClientData)
 	if err != nil {
 		return fmt.Errorf("failed to build quick chart: %w", err)
 	}
@@ -78,7 +83,7 @@ func (n *SlackNotifier) SendReport(data []datasources.ClientData) error {
 			slack.NewSectionBlock(
 				slack.NewTextBlockObject(
 					slack.MarkdownType,
-					report,
+					reportMsg,
 					false,
 					false,
 				),
