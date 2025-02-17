@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"client-nodes-reporter/configs"
 	"client-nodes-reporter/database"
@@ -38,6 +39,10 @@ type RootCmdFlags struct {
 	SlackAppToken string
 	// Slack Channel
 	SlackChannel string
+
+	// Add new flags for MaxRetries and InitialRetryDelay
+	MaxRetries        int
+	InitialRetryDelay time.Duration
 }
 
 func (f *RootCmdFlags) Validate() error {
@@ -123,7 +128,10 @@ func NewRootCmd() (*cobra.Command, error) {
 			// Configure source
 			switch datasources.DataSourceType(flags.Source) {
 			case datasources.DataSourceTypeEthernets:
-				source := &datasources.EthernetsDataSource{}
+				source, err := datasources.NewEthernetsDataSource(nil)
+				if err != nil {
+					return fmt.Errorf("failed to create ethernets data source: %w", err)
+				}
 				ctx = context.WithValue(ctx, configs.ContextKeySource, source)
 			default:
 				return fmt.Errorf("invalid source: \"%s\"", flags.Source)
@@ -224,21 +232,25 @@ func NewRootCmd() (*cobra.Command, error) {
 	rootCmd.PersistentFlags().StringVarP(&flags.Client, "client", "c", string(configs.ClientTypeNethermind), "client name")
 
 	// Skip Update
-	rootCmd.PersistentFlags().BoolVarP(&flags.SkipUpdate, "skip-update", "", false, "skip updating data")
+	rootCmd.PersistentFlags().BoolVar(&flags.SkipUpdate, "skip-update", false, "skip updating data")
 
 	// Notion DB
 	viper.BindEnv("notion_db")
-	rootCmd.PersistentFlags().StringVarP(&flags.NotionDB, "notion-db", "", "", "notion db. environment variable: REPORTER_NOTION_DB")
+	rootCmd.PersistentFlags().StringVar(&flags.NotionDB, "notion-db", "", "notion db. environment variable: REPORTER_NOTION_DB")
 	// Notion Token
 	viper.BindEnv("notion_token")
-	rootCmd.PersistentFlags().StringVarP(&flags.NotionToken, "notion-token", "", "", "notion token. environment variable: REPORTER_NOTION_TOKEN")
+	rootCmd.PersistentFlags().StringVar(&flags.NotionToken, "notion-token", "", "notion token. environment variable: REPORTER_NOTION_TOKEN")
 
 	// Slack App Token
 	viper.BindEnv("slack_app_token")
-	rootCmd.PersistentFlags().StringVarP(&flags.SlackAppToken, "slack-app-token", "", "", "slack app token. environment variable: REPORTER_SLACK_APP_TOKEN")
+	rootCmd.PersistentFlags().StringVar(&flags.SlackAppToken, "slack-app-token", "", "slack app token. environment variable: REPORTER_SLACK_APP_TOKEN")
 	// Slack Channel
 	viper.BindEnv("slack_channel")
-	rootCmd.PersistentFlags().StringVarP(&flags.SlackChannel, "slack-channel", "", "", "slack channel name or id. environment variable: REPORTER_SLACK_CHANNEL")
+	rootCmd.PersistentFlags().StringVar(&flags.SlackChannel, "slack-channel", "", "slack channel name or id. environment variable: REPORTER_SLACK_CHANNEL")
+
+	// Add these new flag bindings at the end of the flag configuration section
+	rootCmd.PersistentFlags().IntVar(&flags.MaxRetries, "max-retries", 3, "maximum number of retries for operations")
+	rootCmd.PersistentFlags().DurationVar(&flags.InitialRetryDelay, "retry-delay", time.Second, "initial delay between retry attempts")
 
 	return rootCmd, nil
 }
