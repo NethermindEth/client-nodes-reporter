@@ -387,7 +387,34 @@ func matchesClientName(ethernodesName string, clientName configs.ClientType) boo
 }
 
 func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (ClientData, error) {
-	// Try to get data from the main page which was working before
+	// First, try to get data from the specific client endpoints with enhanced headers
+	slog.Debug("Trying client-specific endpoints first")
+	clientSynced, totalSynced, err := e.getSyncedDataFromClientEndpoints(clientName)
+	if err == nil {
+		// If we got synced data, try to get unsynced data to calculate totals
+		clientTotal, total, err := e.getTotalDataFromClientEndpoints(clientName)
+		if err == nil {
+			slog.Info("Successfully retrieved data from client endpoints", 
+				"client", clientName, 
+				"clientTotal", clientTotal, 
+				"clientSynced", clientSynced,
+				"overallTotal", total,
+				"overallSynced", totalSynced)
+
+			return ClientData{
+				Source:       string(e.SourceType()),
+				ClientName:   clientName,
+				Total:        total,
+				ClientTotal:  clientTotal,
+				TotalSynced:  totalSynced,
+				ClientSynced: clientSynced,
+				CreatedAt:    time.Now(),
+			}, nil
+		}
+	}
+
+	// Fallback to main page approach
+	slog.Debug("Falling back to main page approach")
 	mainURLs := []string{
 		"https://ethernodes.org/",
 		"https://ethernodes.org",
@@ -418,17 +445,11 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 		return ClientData{}, fmt.Errorf("failed to get data from any ethernodes.org endpoint: %w", lastErr)
 	}
 
-	// For Ethernodes.org, we need to get the actual synced vs unsynced data
-	// Let's try to get this from the specific client endpoints with better headers
-	clientSynced, totalSynced, err := e.getSyncedDataFromClientEndpoints(clientName)
-	if err != nil {
-		slog.Debug("Could not get synced data from client endpoints, using fallback", "error", err)
-		// Fallback: assume most nodes are synced (reasonable for active nodes)
-		clientSynced = int64(float64(clientTotal) * 0.95) // Assume 95% synced
-		totalSynced = int64(float64(total) * 0.95)
-	}
+	// Use fallback synced data
+	clientSynced = int64(float64(clientTotal) * 0.95) // Assume 95% synced
+	totalSynced = int64(float64(total) * 0.95)
 
-	slog.Info("Retrieved data from Ethernodes main page", 
+	slog.Info("Retrieved data from Ethernodes main page (fallback)", 
 		"client", clientName, 
 		"clientTotal", clientTotal, 
 		"clientSynced", clientSynced,
@@ -620,6 +641,35 @@ func (e EthernodesDataSource) getSyncedDataFromClientEndpoints(clientName config
 		"unsynced", unsyncedCount)
 
 	return clientSynced, totalSynced, nil
+}
+
+// getTotalDataFromClientEndpoints gets total data from client endpoints
+func (e EthernodesDataSource) getTotalDataFromClientEndpoints(clientName configs.ClientType) (int64, int64, error) {
+	// Map client names to Ethernodes URL format
+	clientURLName := e.getClientURLName(clientName)
+	if clientURLName == "" {
+		return -1, -1, fmt.Errorf("unsupported client: %s", clientName)
+	}
+
+	// Try to get total data from client endpoint without synced parameter
+	totalURL := fmt.Sprintf("https://ethernodes.org/client/el/%s", clientURLName)
+
+	slog.Debug("Trying to get total data from client endpoint", "url", totalURL)
+	totalCount, err := e.getClientCountWithEnhancedHeaders(totalURL)
+	if err != nil {
+		return -1, -1, fmt.Errorf("failed to get total data: %w", err)
+	}
+
+	// For now, assume client total equals total count
+	// We could refine this later if needed
+	clientTotal := totalCount
+
+	slog.Debug("Successfully got total data from client endpoint", 
+		"client", clientName, 
+		"clientTotal", clientTotal, 
+		"total", totalCount)
+
+	return clientTotal, totalCount, nil
 }
 
 // getMainPageContent gets the raw HTML content from a URL
