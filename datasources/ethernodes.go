@@ -743,15 +743,19 @@ func (e EthernodesDataSource) getSyncedDataFromMainPage(clientName configs.Clien
 	// Get the main page content
 	mainPageContent, err := e.getMainPageContent("https://ethernodes.org/")
 	if err != nil {
+		slog.Debug("Failed to get main page content", "error", err)
 		return -1, fmt.Errorf("failed to get main page content: %w", err)
 	}
 	
+	slog.Debug("Parsing main page HTML for synced data")
 	// Parse the HTML
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(mainPageContent))
 	if err != nil {
+		slog.Debug("Failed to parse main page HTML", "error", err)
 		return -1, fmt.Errorf("failed to parse main page HTML: %w", err)
 	}
 	
+	slog.Debug("Searching for synced data for client", "clientName", clientName)
 	// Look for synced data in the HTML structure
 	// Try different selectors that might contain synced information
 	selectors := []string{
@@ -766,30 +770,31 @@ func (e EthernodesDataSource) getSyncedDataFromMainPage(clientName configs.Clien
 	var foundSyncedCount int64 = -1
 	
 	for _, selector := range selectors {
+		slog.Debug("Trying selector", "selector", selector)
 		doc.Find(selector).Each(func(i int, s *goquery.Selection) {
 			if foundSyncedCount > 0 {
 				return
 			}
-			
 			// Check if this element is related to our client
 			parent := s.Parent()
+			parentText := parent.Text()
+			slog.Debug("Selector match", "selector", selector, "elementText", s.Text(), "parentText", parentText)
 			if parent.Length() > 0 {
 				// Look for client name in parent elements
-				parentText := parent.Text()
 				if strings.Contains(strings.ToLower(parentText), strings.ToLower(string(clientName))) {
 					syncedText := strings.TrimSpace(s.Text())
-					slog.Debug("Found potential synced data", "selector", selector, "text", syncedText)
-					
+					slog.Debug("Found potential synced data for client", "selector", selector, "text", syncedText)
 					// Try to extract number
 					syncedCount, err := strconv.ParseInt(syncedText, 10, 64)
 					if err == nil && syncedCount > 0 {
 						slog.Debug("Successfully extracted synced count from main page", "count", syncedCount)
 						foundSyncedCount = syncedCount
+					} else {
+						slog.Debug("Failed to parse synced count", "text", syncedText, "error", err)
 					}
 				}
 			}
 		})
-		
 		if foundSyncedCount > 0 {
 			break
 		}
@@ -801,33 +806,32 @@ func (e EthernodesDataSource) getSyncedDataFromMainPage(clientName configs.Clien
 			if foundSyncedCount > 0 {
 				return
 			}
-			
-			// Check if this is our client
 			clientNameElement := s.Find(".client-name, .progress-group-header div")
-			if clientNameElement.Length() > 0 {
-				clientNameText := strings.ToLower(strings.TrimSpace(clientNameElement.Text()))
-				if matchesClientName(clientNameText, clientName) {
-					// Look for synced information in this progress group
-					syncedElement := s.Find(".synced, .status, [data-status='synced']")
-					if syncedElement.Length() > 0 {
-						syncedText := strings.TrimSpace(syncedElement.Text())
-						slog.Debug("Found synced data in progress group", "text", syncedText)
-						
-						syncedCount, err := strconv.ParseInt(syncedText, 10, 64)
-						if err == nil && syncedCount > 0 {
-							slog.Debug("Successfully extracted synced count from progress group", "count", syncedCount)
-							foundSyncedCount = syncedCount
-						}
+			clientNameText := strings.ToLower(strings.TrimSpace(clientNameElement.Text()))
+			slog.Debug("Progress group", "clientNameText", clientNameText)
+			if clientNameElement.Length() > 0 && matchesClientName(clientNameText, clientName) {
+				slog.Debug("Matched progress group for client", "clientName", clientName)
+				syncedElement := s.Find(".synced, .status, [data-status='synced']")
+				slog.Debug("Progress group synced element count", "count", syncedElement.Length())
+				if syncedElement.Length() > 0 {
+					syncedText := strings.TrimSpace(syncedElement.Text())
+					slog.Debug("Found synced data in progress group", "text", syncedText)
+					syncedCount, err := strconv.ParseInt(syncedText, 10, 64)
+					if err == nil && syncedCount > 0 {
+						slog.Debug("Successfully extracted synced count from progress group", "count", syncedCount)
+						foundSyncedCount = syncedCount
+					} else {
+						slog.Debug("Failed to parse synced count in progress group", "text", syncedText, "error", err)
 					}
 				}
 			}
 		})
 	}
-	
 	if foundSyncedCount > 0 {
+		slog.Debug("Returning found synced count", "count", foundSyncedCount)
 		return foundSyncedCount, nil
 	}
-	
+	slog.Debug("No synced data found for client", "clientName", clientName)
 	return -1, fmt.Errorf("no synced data found for client %s", clientName)
 }
 
