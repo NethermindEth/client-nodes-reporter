@@ -44,9 +44,17 @@ func (n *SlackNotifier) buildChangeMsg(change int64) string {
 }
 
 func (n *SlackNotifier) SendReport(report NotifierReport) error {
+	slog.Debug("Starting to send Slack report", "sourceName", report.SourceName, "dataCount", len(report.ClientData))
+	
+	if len(report.ClientData) == 0 {
+		return fmt.Errorf("no client data to report")
+	}
+	
 	slices.SortFunc(report.ClientData, datasources.ClientData.Compare)
 	lastUpdate := report.ClientData[len(report.ClientData)-1]
 	client := lastUpdate.ClientName.String()
+	
+	slog.Debug("Prepared report data", "client", client, "lastUpdate", lastUpdate)
 
 	reportMsg := fmt.Sprintf(
 		"Today there are *%d* | *%.2f%%* %s nodes from which *%d* | *%.2f%%* are synced(*%.2f%%*)!",
@@ -72,10 +80,12 @@ func (n *SlackNotifier) SendReport(report NotifierReport) error {
 		)
 	}
 
+	slog.Debug("Building quick chart")
 	quickChart, err := BuildQuickChart(report.SourceName, report.ClientData)
 	if err != nil {
 		return fmt.Errorf("failed to build quick chart: %w", err)
 	}
+	slog.Debug("Quick chart built successfully", "chartUrl", quickChart)
 
 	result, _, err := n.api.PostMessage(
 		n.channel,

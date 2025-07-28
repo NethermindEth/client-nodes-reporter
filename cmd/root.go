@@ -199,11 +199,14 @@ func NewRootCmd() (*cobra.Command, error) {
 			}
 
 			// Reporting data
+			logger.Info("Getting historical data for reporting")
 			historicalData, err := database.GetLatestData(flags.Client, 35, datasources.DataSourceType(flags.Source))
 			if err != nil {
 				return fmt.Errorf("failed to get historical data: %w", err)
 			}
+			logger.Info("Retrieved historical data", "count", len(historicalData))
 
+			logger.Info("Sending report to Slack")
 			slackNotifier := ctx.Value(configs.ContextKeyNotifier).(*notifier.SlackNotifier)
 			if err := slackNotifier.SendReport(
 				notifier.NotifierReport{
@@ -213,6 +216,7 @@ func NewRootCmd() (*cobra.Command, error) {
 			); err != nil {
 				return fmt.Errorf("failed to send report: %w", err)
 			}
+			logger.Info("Report sent successfully")
 
 			return nil
 		},

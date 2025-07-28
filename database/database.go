@@ -3,6 +3,7 @@ package database
 import (
 	"client-nodes-reporter/datasources"
 	"context"
+	"log/slog"
 
 	"github.com/jomei/notionapi"
 )
@@ -22,6 +23,8 @@ func (db *NotionDB) GetLatestData(
 	pageSize int,
 	source datasources.DataSourceType,
 ) ([]datasources.ClientData, error) {
+	slog.Debug("Querying Notion database", "client", client, "pageSize", pageSize, "source", source)
+	
 	response, err := db.client.Database.Query(
 		context.Background(),
 		notionapi.DatabaseID(db.database.ID),
@@ -54,6 +57,7 @@ func (db *NotionDB) GetLatestData(
 	}
 
 	pages := response.Results
+	slog.Debug("Retrieved pages from Notion", "pageCount", len(pages))
 	latestData := make([]datasources.ClientData, 0, len(pages))
 	for _, page := range pages {
 		clientData, err := PageToClientData(&page)
@@ -64,6 +68,7 @@ func (db *NotionDB) GetLatestData(
 		latestData = append(latestData, clientData)
 	}
 
+	slog.Debug("Processed client data", "dataCount", len(latestData))
 	return latestData, nil
 }
 

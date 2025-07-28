@@ -27,8 +27,8 @@ jobs:
           REPORTER_SLACK_APP_TOKEN: ${{ secrets.REPORTER_SLACK_APP_TOKEN }}
           REPORTER_SLACK_CHANNEL: ${{ secrets.REPORTER_SLACK_CHANNEL }}
         run: |
-          ARGS=""
+          ARGS="--debug"
           if [ "${{ inputs.skip-update }}" = "true" ]; then
-            ARGS="--skip-update"
+            ARGS="$ARGS --skip-update"
           fi
           go run main.go $ARGS
