@@ -469,7 +469,7 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 
 	// Try to get synced data from the main page HTML
 	slog.Debug("Trying to extract synced data from main page HTML")
-	mainPageSynced, err := e.getSyncedDataFromMainPageHTML(mainPageContent, clientName)
+	mainPageSynced, err := e.getSyncedDataFromMainPageHTML(mainPageContent, clientName, clientTotal)
 	if err == nil && mainPageSynced > 0 {
 		clientSynced = mainPageSynced
 		totalSynced = mainPageSynced // For now, assume client synced = total synced
@@ -746,7 +746,7 @@ func (e EthernodesDataSource) getMainPageContent(url string) (string, error) {
 }
 
 // getSyncedDataFromMainPageHTML tries to extract synced data from provided HTML content
-func (e EthernodesDataSource) getSyncedDataFromMainPageHTML(htmlContent string, clientName configs.ClientType) (int64, error) {
+func (e EthernodesDataSource) getSyncedDataFromMainPageHTML(htmlContent string, clientName configs.ClientType, clientTotal int64) (int64, error) {
 	slog.Debug("Parsing provided HTML for synced data")
 	// Parse the HTML
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
@@ -765,6 +765,19 @@ func (e EthernodesDataSource) getSyncedDataFromMainPageHTML(htmlContent string, 
 		".client-synced",
 		"[data-synced]",
 		".status-synced",
+		".synced",
+		".status",
+		".node-status",
+		".client-status",
+		".sync-status",
+		".progress-bar",
+		".progress",
+		".badge",
+		".label",
+		".tag",
+		"[class*='synced']",
+		"[class*='status']",
+		"[class*='sync']",
 	}
 	
 	var foundSyncedCount int64 = -1
@@ -822,6 +835,40 @@ func (e EthernodesDataSource) getSyncedDataFromMainPageHTML(htmlContent string, 
 						foundSyncedCount = syncedCount
 					} else {
 						slog.Debug("Failed to parse synced count in progress group", "text", syncedText, "error", err)
+					}
+				}
+			}
+		})
+	}
+	
+	// If still no synced data found, try a more comprehensive search
+	if foundSyncedCount <= 0 {
+		slog.Debug("Trying comprehensive search for synced data")
+		// Look for any text containing "synced" or numbers near the client name
+		doc.Find("*").Each(func(i int, s *goquery.Selection) {
+			if foundSyncedCount > 0 {
+				return
+			}
+			
+			elementText := strings.ToLower(strings.TrimSpace(s.Text()))
+			
+			// Check if this element contains both the client name and synced-related text
+			if strings.Contains(elementText, strings.ToLower(string(clientName))) && 
+			   (strings.Contains(elementText, "synced") || strings.Contains(elementText, "sync")) {
+				
+				slog.Debug("Found element with client and synced text", "text", elementText)
+				
+				// Try to extract numbers from this text
+				re := regexp.MustCompile(`(\d{1,3}(?:,\d{3})*)`)
+				matches := re.FindStringSubmatch(elementText)
+				if len(matches) > 1 {
+					cleanMatch := strings.ReplaceAll(matches[1], ",", "")
+					if parsed, err := strconv.ParseInt(cleanMatch, 10, 64); err == nil && parsed > 0 {
+						// Make sure this number is reasonable (not the total count)
+						if parsed < clientTotal && parsed > 0 {
+							slog.Debug("Found potential synced count in comprehensive search", "count", parsed, "text", elementText)
+							foundSyncedCount = parsed
+						}
 					}
 				}
 			}
