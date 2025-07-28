@@ -2,6 +2,7 @@ package datasources
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -61,6 +62,75 @@ func (e EthernodesDataSource) SourceName() string {
 }
 
 func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.ClientType) (int64, int64, error) {
+	// Total number of clients
+	var total int64 = -1
+	var clientNumber int64 = -1
+	var scrapeErr error
+
+	// Try direct HTTP request first (like curl)
+	slog.Debug("Trying direct HTTP request like curl", "url", url)
+	
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	
+	// Create request with exact same headers as working curl
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return -1, -1, fmt.Errorf("failed to create request: %w", err)
+	}
+	
+	// Set the exact same User-Agent as the working curl command
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	
+	// Make the request
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Debug("Direct HTTP request failed", "error", err)
+		// Fall back to colly if direct request fails
+		return e.getNumbersFromWithColly(url, clientName)
+	}
+	defer resp.Body.Close()
+	
+	slog.Debug("Direct HTTP request successful", "status", resp.StatusCode, "contentLength", resp.ContentLength)
+	
+	// Read the response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		slog.Debug("Failed to read response body", "error", err)
+		return e.getNumbersFromWithColly(url, clientName)
+	}
+	
+	bodyStr := string(body)
+	slog.Debug("Response body length", "length", len(bodyStr))
+	
+	// Check if we got a Cloudflare protection page
+	if strings.Contains(bodyStr, "Just a moment") || strings.Contains(bodyStr, "Cloudflare") {
+		slog.Debug("Detected Cloudflare protection page in direct request")
+		return e.getNumbersFromWithColly(url, clientName)
+	}
+	
+	// Parse the HTML using goquery
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(bodyStr))
+	if err != nil {
+		slog.Debug("Failed to parse HTML from direct request", "error", err)
+		return e.getNumbersFromWithColly(url, clientName)
+	}
+	
+	// Process the HTML
+	processHTML(doc, clientName, &total, &clientNumber, &scrapeErr)
+	
+	if total > 0 && clientNumber > 0 {
+		slog.Debug("Successfully extracted data from direct HTTP request", "total", total, "clientNumber", clientNumber)
+		return total, clientNumber, nil
+	}
+	
+	slog.Debug("Direct HTTP request didn't yield data, trying colly fallback")
+	return e.getNumbersFromWithColly(url, clientName)
+}
+
+func (e EthernodesDataSource) getNumbersFromWithColly(url string, clientName configs.ClientType) (int64, int64, error) {
 	// Total number of clients
 	var total int64 = -1
 	var clientNumber int64 = -1
