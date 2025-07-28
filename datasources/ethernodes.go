@@ -103,16 +103,27 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 		
 		// If we got a 403 Forbidden, try to process the response anyway
 		if r.StatusCode == 403 {
-			slog.Debug("Received 403 Forbidden, attempting to process response body")
+			slog.Debug("Received 403 Forbidden, attempting to process response body", "bodyLength", len(r.Body))
+			
+			// Log a snippet of the response body to see what we're getting
+			bodyStr := string(r.Body)
+			if len(bodyStr) > 200 {
+				slog.Debug("Response body snippet", "snippet", bodyStr[:200])
+			} else {
+				slog.Debug("Response body", "body", bodyStr)
+			}
+			
 			// Try to parse the response body even with 403
-			doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(r.Body)))
+			doc, err := goquery.NewDocumentFromReader(strings.NewReader(bodyStr))
 			if err != nil {
 				slog.Debug("Failed to parse response body", "error", err)
 				return
 			}
 			
+			slog.Debug("Successfully parsed response body, processing HTML")
 			// Process the HTML manually
 			processHTML(doc, clientName, &total, &clientNumber, &scrapeErr)
+			slog.Debug("Finished processing HTML from 403 response", "total", total, "clientNumber", clientNumber)
 			return
 		}
 		
@@ -126,13 +137,21 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 		}
 	})
 
-	if err := c.Visit(url); err != nil {
-		// If we got some data despite the error, we can still use it
-		if total > 0 && clientNumber > 0 {
-			slog.Debug("Got data despite error, proceeding with available data", "total", total, "clientNumber", clientNumber)
-			return total, clientNumber, nil
-		}
-		return -1, -1, err
+	visitErr := c.Visit(url)
+	
+	// Check if we got data despite any errors
+	if total > 0 && clientNumber > 0 {
+		slog.Debug("Got data despite error, proceeding with available data", "total", total, "clientNumber", clientNumber, "visitError", visitErr)
+		return total, clientNumber, nil
+	}
+	
+	// If we got some data but not complete, log it
+	if total > 0 || clientNumber > 0 {
+		slog.Debug("Got partial data", "total", total, "clientNumber", clientNumber, "visitError", visitErr)
+	}
+	
+	if visitErr != nil {
+		return -1, -1, visitErr
 	}
 
 	if scrapeErr != nil {
@@ -154,13 +173,18 @@ func processHTML(doc *goquery.Document, clientName configs.ClientType, total *in
 
 // processHTMLFromSelection extracts client data from a goquery selection
 func processHTMLFromSelection(s *goquery.Selection, clientName configs.ClientType, total *int64, clientNumber *int64, scrapeErr *error) {
-	slog.Debug("Found Execution Layer Clients section")
+	slog.Debug("Processing HTML from selection", "clientName", clientName)
 	
 	// Find the parent container that holds all progress groups
 	parent := s.Parent()
+	slog.Debug("Found parent container", "parentLength", parent.Length())
 	
 	// Look for progress groups within this section
-	parent.Find(".progress-group").Each(func(i int, s *goquery.Selection) {
+	progressGroups := parent.Find(".progress-group")
+	slog.Debug("Found progress groups", "count", progressGroups.Length())
+	
+	// Process each progress group
+	progressGroups.Each(func(i int, s *goquery.Selection) {
 		// Get the client name and count from the progress group header
 		header := s.Find(".progress-group-header")
 		
