@@ -418,31 +418,35 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 		return ClientData{}, fmt.Errorf("failed to get total counts from any ethernodes.org endpoint: %w", lastErr)
 	}
 
-	// Now try to get synced/unsynced ratios from client endpoints
-	slog.Debug("Trying client-specific endpoints for synced ratios")
-	clientSynced, totalSynced, err := e.getSyncedDataFromClientEndpoints(clientName)
-	if err == nil {
-		// Calculate the actual synced counts based on the ratios from client endpoints
-		// but using the correct totals from main page
-		syncedRatio := float64(clientSynced) / float64(clientSynced + 92) // 92 was the total from client endpoint
-		actualClientSynced := int64(float64(clientTotal) * syncedRatio)
-		actualTotalSynced := int64(float64(total) * syncedRatio)
+	// Declare synced variables for both success and fallback cases
+	var clientSynced int64
+	var totalSynced int64
 
-		slog.Info("Successfully retrieved data using main page totals + client endpoint ratios", 
+	// Now try to get synced/unsynced data from client endpoints
+	slog.Debug("Trying client-specific endpoints for synced data")
+	syncedCount, unsyncedCount, err := e.getSyncedUnsyncedDataFromClientEndpoints(clientName)
+	if err == nil {
+		// Use the synced count directly from the client endpoint
+		// The client endpoint shows the actual synced count for this client
+		clientSynced = syncedCount
+		totalSynced = syncedCount // For now, assume client synced = total synced
+
+		slog.Info("Successfully retrieved data using main page totals + client endpoint synced data", 
 			"client", clientName, 
 			"clientTotal", clientTotal, 
-			"clientSynced", actualClientSynced,
+			"clientSynced", clientSynced,
 			"overallTotal", total,
-			"overallSynced", actualTotalSynced,
-			"syncedRatio", fmt.Sprintf("%.2f%%", syncedRatio*100))
+			"overallSynced", totalSynced,
+			"syncedFromEndpoint", syncedCount,
+			"unsyncedFromEndpoint", unsyncedCount)
 
 		return ClientData{
 			Source:       string(e.SourceType()),
 			ClientName:   clientName,
 			Total:        total,
 			ClientTotal:  clientTotal,
-			TotalSynced:  actualTotalSynced,
-			ClientSynced: actualClientSynced,
+			TotalSynced:  totalSynced,
+			ClientSynced: clientSynced,
 			CreatedAt:    time.Now(),
 		}, nil
 	}
@@ -610,15 +614,15 @@ func (e EthernodesDataSource) getClientCountFromURL(url string) (int64, error) {
 	return -1, fmt.Errorf("could not extract count from URL: %s", url)
 }
 
-// getSyncedDataFromClientEndpoints tries to get synced vs unsynced data from client-specific endpoints
-func (e EthernodesDataSource) getSyncedDataFromClientEndpoints(clientName configs.ClientType) (int64, int64, error) {
+// getSyncedUnsyncedDataFromClientEndpoints gets both synced and unsynced data from client endpoints
+func (e EthernodesDataSource) getSyncedUnsyncedDataFromClientEndpoints(clientName configs.ClientType) (int64, int64, error) {
 	// Map client names to Ethernodes URL format
 	clientURLName := e.getClientURLName(clientName)
 	if clientURLName == "" {
 		return -1, -1, fmt.Errorf("unsupported client: %s", clientName)
 	}
 
-	// Try to get synced and unsynced data with more aggressive headers
+	// Try to get synced and unsynced data with enhanced headers
 	syncedURL := fmt.Sprintf("https://ethernodes.org/client/el/%s?synced=1", clientURLName)
 	unsyncedURL := fmt.Sprintf("https://ethernodes.org/client/el/%s?synced=0", clientURLName)
 
@@ -634,16 +638,12 @@ func (e EthernodesDataSource) getSyncedDataFromClientEndpoints(clientName config
 		return -1, -1, fmt.Errorf("failed to get unsynced data: %w", err)
 	}
 
-	// Calculate totals
-	clientSynced := syncedCount
-	totalSynced := syncedCount // For now, assume client synced = total synced
-
-	slog.Debug("Successfully got synced data from client endpoints", 
+	slog.Debug("Successfully got synced/unsynced data from client endpoints", 
 		"client", clientName, 
 		"synced", syncedCount, 
 		"unsynced", unsyncedCount)
 
-	return clientSynced, totalSynced, nil
+	return syncedCount, unsyncedCount, nil
 }
 
 // getTotalDataFromClientEndpoints gets total data from client endpoints
