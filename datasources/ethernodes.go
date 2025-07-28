@@ -3,6 +3,7 @@ package datasources
 import (
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -67,6 +68,7 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 
 	c := colly.NewCollector(
 		colly.MaxDepth(1),
+		colly.AllowURLRevisit(),
 	)
 	
 	// Add a delay between requests to be respectful
@@ -75,8 +77,17 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 		RandomDelay: 5 * time.Second,
 	})
 
-	// Set user agent and headers to avoid protection
-	c.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	// Try different user agents to avoid detection
+	userAgents := []string{
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0",
+	}
+	
+	// Use a random user agent
+	randomIndex := time.Now().UnixNano() % int64(len(userAgents))
+	c.UserAgent = userAgents[randomIndex]
 	
 	c.OnRequest(func(r *colly.Request) {
 		// Add headers that might help bypass protection
@@ -151,7 +162,40 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 		}
 	})
 
-	visitErr := c.Visit(url)
+	// Try different HTTP methods
+	methods := []string{"GET", "HEAD"}
+	var visitErr error
+	
+	for _, method := range methods {
+		if method == "GET" {
+			visitErr = c.Visit(url)
+		} else {
+			// For HEAD requests, we need to handle differently
+			req, err := http.NewRequest(method, url, nil)
+			if err != nil {
+				continue
+			}
+			req.Header.Set("User-Agent", c.UserAgent)
+			req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+			
+			client := &http.Client{Timeout: 30 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				continue
+			}
+			resp.Body.Close()
+			
+			if resp.StatusCode == 200 {
+				// If HEAD works, try GET
+				visitErr = c.Visit(url)
+				break
+			}
+		}
+		
+		if visitErr == nil {
+			break
+		}
+	}
 	
 	// Check if we got data despite any errors
 	if total > 0 && clientNumber > 0 {
@@ -270,24 +314,36 @@ func matchesClientName(ethernodesName string, clientName configs.ClientType) boo
 }
 
 func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (ClientData, error) {
-	// Ethernodes.org shows all nodes as synced (they only show active nodes)
-	// So we'll treat all nodes as synced for this data source
-	total, clientTotal, err := e.getNumbersFrom(e.config.BaseURL, clientName)
-	if err != nil {
-		return ClientData{}, fmt.Errorf("failed to get client data: %w", err)
+	// Try multiple URLs/endpoints to find one that works
+	urls := []string{
+		"https://ethernodes.org/",
+		"https://ethernodes.org",
+		"https://www.ethernodes.org/",
+		"https://www.ethernodes.org",
+		// Try with different paths that might be less protected
+		"https://ethernodes.org/stats",
+		"https://ethernodes.org/api/stats",
+		"https://ethernodes.org/data",
 	}
 
-	// For Ethernodes, we assume all nodes are synced since they only show active nodes
-	totalSynced := total
-	clientSynced := clientTotal
+	var lastErr error
+	for _, url := range urls {
+		slog.Debug("Trying URL", "url", url)
+		total, clientNumber, err := e.getNumbersFrom(url, clientName)
+		if err == nil && total > 0 && clientNumber > 0 {
+			slog.Info("Successfully retrieved data from", "url", url)
+			return ClientData{
+				Total:       total,
+				ClientTotal: clientNumber,
+				TotalSynced: total, // Assume all are synced for ethernodes
+				ClientSynced: clientNumber,
+			}, nil
+		}
+		lastErr = err
+		slog.Debug("Failed to get data from", "url", url, "error", err)
+		// Add delay between attempts
+		time.Sleep(2 * time.Second)
+	}
 
-	return ClientData{
-		string(e.SourceType()),
-		clientName,
-		total,
-		clientTotal,
-		totalSynced,
-		clientSynced,
-		time.Now(),
-	}, nil
+	return ClientData{}, fmt.Errorf("failed to get data from any ethernodes.org endpoint: %w", lastErr)
 } 
