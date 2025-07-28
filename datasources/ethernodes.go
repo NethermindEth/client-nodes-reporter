@@ -68,11 +68,24 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 	c := colly.NewCollector(
 		colly.MaxDepth(1),
 	)
+	
+	// Add a delay between requests to be respectful
+	c.Limit(&colly.LimitRule{
+		DomainGlob:  "*",
+		RandomDelay: 2 * time.Second,
+	})
 
-	// Set user agent to avoid Cloudflare protection
+	// Set user agent and headers to avoid protection
 	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
+	
 	c.OnRequest(func(r *colly.Request) {
+		// Add headers that might help bypass protection
+		r.Headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
+		r.Headers.Set("Accept-Language", "en-US,en;q=0.5")
+		r.Headers.Set("Accept-Encoding", "gzip, deflate")
+		r.Headers.Set("Connection", "keep-alive")
+		r.Headers.Set("Upgrade-Insecure-Requests", "1")
+		
 		slog.Debug("Visiting", "url", r.URL)
 		r.Ctx.Put("retries", 0)
 	})
@@ -133,6 +146,12 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 	})
 
 	c.OnError(func(r *colly.Response, err error) {
+		// If we got a 403 Forbidden but we have data, we can still proceed
+		if r.StatusCode == 403 {
+			slog.Debug("Received 403 Forbidden, but continuing with available data")
+			return
+		}
+		
 		retries := r.Ctx.GetAny("retries").(int)
 		if retries < e.config.MaxRetries {
 			slog.Info("Error during http request. Retrying...", "error", err, "retries", retries)
@@ -144,6 +163,11 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 	})
 
 	if err := c.Visit(url); err != nil {
+		// If we got some data despite the error, we can still use it
+		if total > 0 && clientNumber > 0 {
+			slog.Debug("Got data despite error, proceeding with available data", "total", total, "clientNumber", clientNumber)
+			return total, clientNumber, nil
+		}
 		return -1, -1, err
 	}
 
