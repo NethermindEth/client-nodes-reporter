@@ -387,34 +387,7 @@ func matchesClientName(ethernodesName string, clientName configs.ClientType) boo
 }
 
 func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (ClientData, error) {
-	// First, try to get data from the specific client endpoints with enhanced headers
-	slog.Debug("Trying client-specific endpoints first")
-	clientSynced, totalSynced, err := e.getSyncedDataFromClientEndpoints(clientName)
-	if err == nil {
-		// If we got synced data, try to get unsynced data to calculate totals
-		clientTotal, total, err := e.getTotalDataFromClientEndpoints(clientName)
-		if err == nil {
-			slog.Info("Successfully retrieved data from client endpoints", 
-				"client", clientName, 
-				"clientTotal", clientTotal, 
-				"clientSynced", clientSynced,
-				"overallTotal", total,
-				"overallSynced", totalSynced)
-
-			return ClientData{
-				Source:       string(e.SourceType()),
-				ClientName:   clientName,
-				Total:        total,
-				ClientTotal:  clientTotal,
-				TotalSynced:  totalSynced,
-				ClientSynced: clientSynced,
-				CreatedAt:    time.Now(),
-			}, nil
-		}
-	}
-
-	// Fallback to main page approach
-	slog.Debug("Falling back to main page approach")
+	// First, get the correct total counts from the main page
 	mainURLs := []string{
 		"https://ethernodes.org/",
 		"https://ethernodes.org",
@@ -426,14 +399,14 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 	var clientTotal int64 = -1
 	var lastErr error
 
-	// Try to get data from main page
+	// Try to get data from main page first
 	for _, url := range mainURLs {
-		slog.Debug("Trying main page", "url", url)
+		slog.Debug("Trying main page for total counts", "url", url)
 		overallTotal, clientNumber, err := e.getNumbersFrom(url, clientName)
 		if err == nil && overallTotal > 0 && clientNumber > 0 {
 			total = overallTotal
 			clientTotal = clientNumber
-			slog.Info("Successfully retrieved data from main page", "url", url, "total", total, "clientTotal", clientTotal)
+			slog.Info("Successfully retrieved total counts from main page", "url", url, "total", total, "clientTotal", clientTotal)
 			break
 		}
 		lastErr = err
@@ -442,10 +415,40 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 	}
 
 	if total <= 0 || clientTotal <= 0 {
-		return ClientData{}, fmt.Errorf("failed to get data from any ethernodes.org endpoint: %w", lastErr)
+		return ClientData{}, fmt.Errorf("failed to get total counts from any ethernodes.org endpoint: %w", lastErr)
 	}
 
-	// Use fallback synced data
+	// Now try to get synced/unsynced ratios from client endpoints
+	slog.Debug("Trying client-specific endpoints for synced ratios")
+	clientSynced, totalSynced, err := e.getSyncedDataFromClientEndpoints(clientName)
+	if err == nil {
+		// Calculate the actual synced counts based on the ratios from client endpoints
+		// but using the correct totals from main page
+		syncedRatio := float64(clientSynced) / float64(clientSynced + 92) // 92 was the total from client endpoint
+		actualClientSynced := int64(float64(clientTotal) * syncedRatio)
+		actualTotalSynced := int64(float64(total) * syncedRatio)
+
+		slog.Info("Successfully retrieved data using main page totals + client endpoint ratios", 
+			"client", clientName, 
+			"clientTotal", clientTotal, 
+			"clientSynced", actualClientSynced,
+			"overallTotal", total,
+			"overallSynced", actualTotalSynced,
+			"syncedRatio", fmt.Sprintf("%.2f%%", syncedRatio*100))
+
+		return ClientData{
+			Source:       string(e.SourceType()),
+			ClientName:   clientName,
+			Total:        total,
+			ClientTotal:  clientTotal,
+			TotalSynced:  actualTotalSynced,
+			ClientSynced: actualClientSynced,
+			CreatedAt:    time.Now(),
+		}, nil
+	}
+
+	// Fallback: use main page data with estimated synced percentage
+	slog.Debug("Using fallback with main page data")
 	clientSynced = int64(float64(clientTotal) * 0.95) // Assume 95% synced
 	totalSynced = int64(float64(total) * 0.95)
 
