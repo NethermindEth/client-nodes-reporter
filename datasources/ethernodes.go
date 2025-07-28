@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -386,43 +387,204 @@ func matchesClientName(ethernodesName string, clientName configs.ClientType) boo
 }
 
 func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (ClientData, error) {
-	// Try multiple URLs/endpoints to find one that works
-	urls := []string{
+	// Map client names to Ethernodes URL format
+	clientURLName := e.getClientURLName(clientName)
+	if clientURLName == "" {
+		return ClientData{}, fmt.Errorf("unsupported client: %s", clientName)
+	}
+
+	// Get synced and unsynced data from specific client endpoints
+	syncedURL := fmt.Sprintf("https://ethernodes.org/client/el/%s?synced=1", clientURLName)
+	unsyncedURL := fmt.Sprintf("https://ethernodes.org/client/el/%s?synced=0", clientURLName)
+
+	slog.Debug("Getting synced data", "url", syncedURL)
+	syncedCount, err := e.getClientCountFromURL(syncedURL)
+	if err != nil {
+		return ClientData{}, fmt.Errorf("failed to get synced data: %w", err)
+	}
+
+	slog.Debug("Getting unsynced data", "url", unsyncedURL)
+	unsyncedCount, err := e.getClientCountFromURL(unsyncedURL)
+	if err != nil {
+		return ClientData{}, fmt.Errorf("failed to get unsynced data: %w", err)
+	}
+
+	// Calculate totals
+	clientTotal := syncedCount + unsyncedCount
+	totalSynced := syncedCount
+	clientSynced := syncedCount
+
+	// Get overall total from main page as fallback
+	mainURLs := []string{
 		"https://ethernodes.org/",
 		"https://ethernodes.org",
 		"https://www.ethernodes.org/",
 		"https://www.ethernodes.org",
 	}
 
-	var lastErr error
-	startTime := time.Now()
-	timeout := 60 * time.Second // 60 second timeout
-	
-	for _, url := range urls {
-		// Check timeout
-		if time.Since(startTime) > timeout {
-			return ClientData{}, fmt.Errorf("timeout reached after %v while trying to access ethernodes.org", timeout)
+	var total int64 = clientTotal // Default to client total if we can't get overall total
+	for _, url := range mainURLs {
+		overallTotal, _, err := e.getNumbersFrom(url, clientName)
+		if err == nil && overallTotal > 0 {
+			total = overallTotal
+			break
 		}
-		
-		slog.Debug("Trying URL", "url", url)
-		total, clientNumber, err := e.getNumbersFrom(url, clientName)
-		if err == nil && total > 0 && clientNumber > 0 {
-			slog.Info("Successfully retrieved data from", "url", url)
-			return ClientData{
-				Source:       string(e.SourceType()),
-				ClientName:   clientName,
-				Total:        total,
-				ClientTotal:  clientNumber,
-				TotalSynced:  total, // Assume all are synced for ethernodes
-				ClientSynced: clientNumber,
-				CreatedAt:    time.Now(),
-			}, nil
-		}
-		lastErr = err
-		slog.Debug("Failed to get data from", "url", url, "error", err)
-		// Add delay between attempts
-		time.Sleep(2 * time.Second)
 	}
 
-	return ClientData{}, fmt.Errorf("failed to get data from any ethernodes.org endpoint: %w", lastErr)
+	slog.Info("Retrieved detailed data from Ethernodes", 
+		"client", clientName, 
+		"synced", syncedCount, 
+		"unsynced", unsyncedCount, 
+		"clientTotal", clientTotal, 
+		"overallTotal", total)
+
+	return ClientData{
+		Source:       string(e.SourceType()),
+		ClientName:   clientName,
+		Total:        total,
+		ClientTotal:  clientTotal,
+		TotalSynced:  totalSynced,
+		ClientSynced: clientSynced,
+		CreatedAt:    time.Now(),
+	}, nil
+}
+
+// getClientURLName maps our client types to Ethernodes URL format
+func (e EthernodesDataSource) getClientURLName(clientName configs.ClientType) string {
+	switch clientName {
+	case configs.ClientTypeNethermind:
+		return "nethermind"
+	case configs.ClientTypeGeth:
+		return "geth"
+	case configs.ClientTypeBesu:
+		return "besu"
+	case configs.ClientTypeErigon:
+		return "erigon"
+	case configs.ClientTypeReth:
+		return "reth"
+	default:
+		return ""
+	}
+}
+
+// getClientCountFromURL gets the count of nodes from a specific client URL
+func (e EthernodesDataSource) getClientCountFromURL(url string) (int64, error) {
+	// Try direct HTTP request first (like curl)
+	slog.Debug("Trying direct HTTP request for client count", "url", url)
+	
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	
+	// Create request with exact same headers as working curl
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return -1, fmt.Errorf("failed to create request: %w", err)
+	}
+	
+	// Set the exact same User-Agent as the working curl command
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	
+	// Make the request
+	resp, err := client.Do(req)
+	if err != nil {
+		slog.Debug("Direct HTTP request failed", "error", err)
+		return -1, err
+	}
+	defer resp.Body.Close()
+	
+	slog.Debug("Direct HTTP request successful", "status", resp.StatusCode, "contentLength", resp.ContentLength)
+	
+	// Read the response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		slog.Debug("Failed to read response body", "error", err)
+		return -1, err
+	}
+	
+	bodyStr := string(body)
+	slog.Debug("Response body length", "length", len(bodyStr))
+	
+	// Check if we got a Cloudflare protection page
+	if strings.Contains(bodyStr, "Just a moment") || strings.Contains(bodyStr, "Cloudflare") {
+		slog.Debug("Detected Cloudflare protection page in direct request")
+		return -1, fmt.Errorf("cloudflare protection detected")
+	}
+	
+	// Parse the HTML using goquery
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(bodyStr))
+	if err != nil {
+		slog.Debug("Failed to parse HTML from direct request", "error", err)
+		return -1, err
+	}
+	
+	// Look for the count in the page
+	// Ethernodes client pages typically show the count in a prominent location
+	var count int64 = -1
+	
+	// Try different selectors to find the count
+	selectors := []string{
+		".node-count",
+		".count",
+		"h1", // Sometimes the count is in the main heading
+		".stats-number",
+		"[data-count]",
+	}
+	
+	for _, selector := range selectors {
+		doc.Find(selector).Each(func(i int, s *goquery.Selection) {
+			text := strings.TrimSpace(s.Text())
+			// Look for numbers in the text
+			if strings.Contains(text, "node") || strings.Contains(text, "count") {
+				// Extract numbers from the text
+				words := strings.Fields(text)
+				for _, word := range words {
+					// Remove common punctuation
+					word = strings.Trim(word, ".,!?()[]{}")
+					if parsed, err := strconv.ParseInt(word, 10, 64); err == nil && parsed > 0 {
+						count = parsed
+						slog.Debug("Found count from selector", "selector", selector, "text", text, "count", count)
+						return
+					}
+				}
+			}
+		})
+		if count > 0 {
+			break
+		}
+	}
+	
+	if count > 0 {
+		slog.Debug("Successfully extracted count from client URL", "url", url, "count", count)
+		return count, nil
+	}
+	
+	// If we couldn't find the count, try to parse the page content more broadly
+	slog.Debug("Could not find count with specific selectors, trying broader search")
+	
+	// Look for any large numbers in the page that might be the count
+	doc.Find("body").Each(func(i int, s *goquery.Selection) {
+		text := s.Text()
+		// Use regex to find numbers
+		re := regexp.MustCompile(`\b(\d{1,3}(?:,\d{3})*)\b`)
+		matches := re.FindAllString(text, -1)
+		for _, match := range matches {
+			// Remove commas and parse
+			cleanMatch := strings.ReplaceAll(match, ",", "")
+			if parsed, err := strconv.ParseInt(cleanMatch, 10, 64); err == nil && parsed > 0 {
+				// Prefer larger numbers as they're more likely to be the count
+				if parsed > count {
+					count = parsed
+				}
+			}
+		}
+	})
+	
+	if count > 0 {
+		slog.Debug("Found count using broader search", "url", url, "count", count)
+		return count, nil
+	}
+	
+	return -1, fmt.Errorf("could not extract count from URL: %s", url)
 } 
