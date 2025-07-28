@@ -426,29 +426,38 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 	slog.Debug("Trying client-specific endpoints for synced data")
 	syncedCount, unsyncedCount, err := e.getSyncedUnsyncedDataFromClientEndpoints(clientName)
 	if err == nil {
-		// Use the synced count directly from the client endpoint
-		// The client endpoint shows the actual synced count for this client
-		clientSynced = syncedCount
-		totalSynced = syncedCount // For now, assume client synced = total synced
+		// Check if the client endpoints are returning complete data
+		clientEndpointTotal := syncedCount + unsyncedCount
+		slog.Debug("Client endpoint totals", "synced", syncedCount, "unsynced", unsyncedCount, "total", clientEndpointTotal, "expectedTotal", clientTotal)
+		
+		if clientEndpointTotal >= clientTotal*9/10 { // If we got at least 90% of expected total
+			// Use the synced count directly from the client endpoint
+			clientSynced = syncedCount
+			totalSynced = syncedCount // For now, assume client synced = total synced
 
-		slog.Info("Successfully retrieved data using main page totals + client endpoint synced data", 
-			"client", clientName, 
-			"clientTotal", clientTotal, 
-			"clientSynced", clientSynced,
-			"overallTotal", total,
-			"overallSynced", totalSynced,
-			"syncedFromEndpoint", syncedCount,
-			"unsyncedFromEndpoint", unsyncedCount)
+			slog.Info("Successfully retrieved data using main page totals + client endpoint synced data", 
+				"client", clientName, 
+				"clientTotal", clientTotal, 
+				"clientSynced", clientSynced,
+				"overallTotal", total,
+				"overallSynced", totalSynced,
+				"syncedFromEndpoint", syncedCount,
+				"unsyncedFromEndpoint", unsyncedCount)
 
-		return ClientData{
-			Source:       string(e.SourceType()),
-			ClientName:   clientName,
-			Total:        total,
-			ClientTotal:  clientTotal,
-			TotalSynced:  totalSynced,
-			ClientSynced: clientSynced,
-			CreatedAt:    time.Now(),
-		}, nil
+			return ClientData{
+				Source:       string(e.SourceType()),
+				ClientName:   clientName,
+				Total:        total,
+				ClientTotal:  clientTotal,
+				TotalSynced:  totalSynced,
+				ClientSynced: clientSynced,
+				CreatedAt:    time.Now(),
+			}, nil
+		} else {
+			slog.Debug("Client endpoints returned incomplete data, falling back to main page", 
+				"endpointTotal", clientEndpointTotal, 
+				"expectedTotal", clientTotal)
+		}
 	}
 
 	// Fallback: use main page data with estimated synced percentage
