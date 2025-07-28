@@ -75,6 +75,7 @@ func ClientDataToPageProperties(clientData datasources.ClientData) (notionapi.Pr
 	
 	// Map client names to Notion database values
 	clientName := string(clientData.ClientName) // Use lowercase as stored in configs
+	fmt.Printf("DEBUG: Client name being sent to Notion: '%s' (type: %T)\n", clientName, clientData.ClientName)
 	pageProperties[PropertyClientTypeKey] = BuildSelectProperty(clientName)
 	
 	pageProperties[PropertyTotalKey] = BuildNumberProperty(float64(clientData.Total))

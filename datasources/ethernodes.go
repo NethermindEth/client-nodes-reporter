@@ -403,10 +403,13 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 		if err == nil && total > 0 && clientNumber > 0 {
 			slog.Info("Successfully retrieved data from", "url", url)
 			return ClientData{
-				Total:       total,
-				ClientTotal: clientNumber,
-				TotalSynced: total, // Assume all are synced for ethernodes
+				Source:       string(e.SourceType()),
+				ClientName:   clientName,
+				Total:        total,
+				ClientTotal:  clientNumber,
+				TotalSynced:  total, // Assume all are synced for ethernodes
 				ClientSynced: clientNumber,
+				CreatedAt:    time.Now(),
 			}, nil
 		}
 		lastErr = err
