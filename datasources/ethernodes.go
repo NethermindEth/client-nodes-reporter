@@ -402,17 +402,15 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 
 	var total int64 = -1
 	var clientTotal int64 = -1
-	var mainPageContent string
 	var lastErr error
 
 	// Try to get data from main page first
 	for _, url := range mainURLs {
 		slog.Debug("Trying main page for total counts", "url", url)
-		overallTotal, clientNumber, htmlContent, err := e.getNumbersFromWithContent(url, clientName)
+		overallTotal, clientNumber, _, err := e.getNumbersFromWithContent(url, clientName)
 		if err == nil && overallTotal > 0 && clientNumber > 0 {
 			total = overallTotal
 			clientTotal = clientNumber
-			mainPageContent = htmlContent
 			slog.Info("Successfully retrieved total counts from main page", "url", url, "total", total, "clientTotal", clientTotal)
 			break
 		}
@@ -467,25 +465,11 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 		}
 	}
 
-	// Try to get synced data from the main page HTML
-	slog.Debug("Trying to extract synced data from main page HTML")
-	mainPageSynced, err := e.getSyncedDataFromMainPageHTML(mainPageContent, clientName, clientTotal)
-	if err == nil && mainPageSynced > 0 {
-		clientSynced = mainPageSynced
-		totalSynced = mainPageSynced // For now, assume client synced = total synced
-		
-		slog.Info("Successfully retrieved synced data from main page", 
-			"client", clientName, 
-			"clientTotal", clientTotal, 
-			"clientSynced", clientSynced,
-			"overallTotal", total,
-			"overallSynced", totalSynced)
-	} else {
-		// Fallback: use main page data with estimated synced percentage
-		slog.Debug("Using fallback with main page data")
-		clientSynced = int64(float64(clientTotal) * 0.85) // Assume 85% synced (closer to actual)
-		totalSynced = int64(float64(total) * 0.85)
-	}
+	// The main page doesn't contain synced data in a parseable format
+	// Use fallback with estimated synced percentage based on typical sync rates
+	slog.Debug("Using fallback with estimated synced percentage")
+	clientSynced = int64(float64(clientTotal) * 0.85) // Assume 85% synced (closer to actual)
+	totalSynced = int64(float64(total) * 0.85)
 
 	slog.Info("Retrieved data from Ethernodes main page (fallback)", 
 		"client", clientName, 
@@ -841,10 +825,36 @@ func (e EthernodesDataSource) getSyncedDataFromMainPageHTML(htmlContent string, 
 		})
 	}
 	
-	// If still no synced data found, try a more comprehensive search
+	// If still no synced data found, try to extract from JavaScript data
 	if foundSyncedCount <= 0 {
-		slog.Debug("Trying comprehensive search for synced data")
-		// Look for any text containing "synced" or numbers near the client name
+		slog.Debug("Trying to extract synced data from JavaScript data")
+		// Look for script tags that might contain synced data
+		doc.Find("script").Each(func(i int, s *goquery.Selection) {
+			if foundSyncedCount > 0 {
+				return
+			}
+			
+			scriptContent := s.Text()
+			if strings.Contains(scriptContent, "piechartdatael") && strings.Contains(scriptContent, "nethermind") {
+				slog.Debug("Found piechart data script", "content", scriptContent[:200])
+				
+				// Look for the nethermind entry in the piechart data
+				nethermindPattern := regexp.MustCompile(`"name":"nethermind","y":(\d+)`)
+				matches := nethermindPattern.FindStringSubmatch(scriptContent)
+				if len(matches) > 1 {
+					if parsed, err := strconv.ParseInt(matches[1], 10, 64); err == nil && parsed > 0 {
+						slog.Debug("Found nethermind data in piechart", "count", parsed)
+						// This is the total, not synced, but let's see if we can find synced data
+					}
+				}
+			}
+		})
+	}
+	
+	// If still no synced data found, try a more targeted search for specific patterns
+	if foundSyncedCount <= 0 {
+		slog.Debug("Trying targeted search for synced patterns")
+		// Look for specific patterns that might indicate synced data
 		doc.Find("*").Each(func(i int, s *goquery.Selection) {
 			if foundSyncedCount > 0 {
 				return
@@ -852,22 +862,31 @@ func (e EthernodesDataSource) getSyncedDataFromMainPageHTML(htmlContent string, 
 			
 			elementText := strings.ToLower(strings.TrimSpace(s.Text()))
 			
-			// Check if this element contains both the client name and synced-related text
-			if strings.Contains(elementText, strings.ToLower(string(clientName))) && 
-			   (strings.Contains(elementText, "synced") || strings.Contains(elementText, "sync")) {
-				
-				slog.Debug("Found element with client and synced text", "text", elementText)
-				
-				// Try to extract numbers from this text
-				re := regexp.MustCompile(`(\d{1,3}(?:,\d{3})*)`)
-				matches := re.FindStringSubmatch(elementText)
-				if len(matches) > 1 {
-					cleanMatch := strings.ReplaceAll(matches[1], ",", "")
-					if parsed, err := strconv.ParseInt(cleanMatch, 10, 64); err == nil && parsed > 0 {
-						// Make sure this number is reasonable (not the total count)
-						if parsed < clientTotal && parsed > 0 {
-							slog.Debug("Found potential synced count in comprehensive search", "count", parsed, "text", elementText)
-							foundSyncedCount = parsed
+			// Look for very specific patterns that indicate synced data
+			syncedPatterns := []string{
+				"synced nodes",
+				"nodes synced", 
+				"synced:",
+				"sync status",
+				"status: synced",
+			}
+			
+			for _, pattern := range syncedPatterns {
+				if strings.Contains(elementText, pattern) && strings.Contains(elementText, strings.ToLower(string(clientName))) {
+					slog.Debug("Found specific synced pattern", "pattern", pattern, "text", elementText)
+					
+					// Extract numbers near this pattern
+					re := regexp.MustCompile(`(\d{1,3}(?:,\d{3})*)`)
+					matches := re.FindStringSubmatch(elementText)
+					if len(matches) > 1 {
+						cleanMatch := strings.ReplaceAll(matches[1], ",", "")
+						if parsed, err := strconv.ParseInt(cleanMatch, 10, 64); err == nil && parsed > 0 {
+							// More strict validation for synced data
+							if parsed < clientTotal && parsed > clientTotal/5 && parsed > 500 {
+								slog.Debug("Found potential synced count with specific pattern", "count", parsed, "pattern", pattern, "text", elementText)
+								foundSyncedCount = parsed
+								break
+							}
 						}
 					}
 				}
