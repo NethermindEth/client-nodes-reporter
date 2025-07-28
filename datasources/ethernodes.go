@@ -223,12 +223,14 @@ func (e EthernodesDataSource) getNumbersFromWithColly(url string, clientName con
 		}
 		
 		retries := r.Ctx.GetAny("retries").(int)
-		if retries < e.config.MaxRetries {
-			slog.Info("Error during http request. Retrying...", "error", err, "retries", retries)
+		if retries < 1 { // Reduce max retries to 1 to prevent infinite loops
+			slog.Debug("Error during http request. Retrying...", "error", err, "retries", retries)
 			delay := time.Duration(int64(e.config.InitialRetryDelay) * (1 << uint(retries)))
 			time.Sleep(delay)
 			r.Ctx.Put("retries", retries+1)
 			r.Request.Retry()
+		} else {
+			slog.Debug("Max retries reached, giving up", "error", err, "retries", retries)
 		}
 	})
 
@@ -390,14 +392,18 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 		"https://ethernodes.org",
 		"https://www.ethernodes.org/",
 		"https://www.ethernodes.org",
-		// Try with different paths that might be less protected
-		"https://ethernodes.org/stats",
-		"https://ethernodes.org/api/stats",
-		"https://ethernodes.org/data",
 	}
 
 	var lastErr error
+	startTime := time.Now()
+	timeout := 60 * time.Second // 60 second timeout
+	
 	for _, url := range urls {
+		// Check timeout
+		if time.Since(startTime) > timeout {
+			return ClientData{}, fmt.Errorf("timeout reached after %v while trying to access ethernodes.org", timeout)
+		}
+		
 		slog.Debug("Trying URL", "url", url)
 		total, clientNumber, err := e.getNumbersFrom(url, clientName)
 		if err == nil && total > 0 && clientNumber > 0 {
