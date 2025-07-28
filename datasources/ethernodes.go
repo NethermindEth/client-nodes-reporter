@@ -94,61 +94,25 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 	c.OnHTML("h4", func(e *colly.HTMLElement) {
 		if strings.Contains(e.Text, "Execution Layer Clients") {
 			slog.Debug("Found Execution Layer Clients section")
-			
-			// Find the parent container that holds all progress groups
-			parent := e.DOM.Parent()
-			
-			// Look for progress groups within this section
-			parent.Find(".progress-group").Each(func(i int, s *goquery.Selection) {
-				// Get the client name and count from the progress group header
-				header := s.Find(".progress-group-header")
-				
-				// Extract client name
-				clientNameElement := header.Find("div").First()
-				clientNameText := strings.TrimSpace(clientNameElement.Text())
-				
-				// Skip if it's the "Total" row
-				if strings.EqualFold(clientNameText, "Total") {
-					// Extract total count
-					countElement := header.Find(".fw-semibold").First()
-					if countElement.Length() > 0 {
-						totalText := strings.TrimSpace(countElement.Text())
-						totalParsed, err := strconv.ParseInt(totalText, 10, 64)
-						if err != nil {
-							scrapeErr = fmt.Errorf("failed to parse total number: %w", err)
-							return
-						}
-						total = totalParsed
-						slog.Debug("Found total", "total", total)
-					}
-					return
-				}
-				
-				// Extract client count
-				countElement := header.Find(".fw-semibold").First()
-				if countElement.Length() > 0 {
-					countText := strings.TrimSpace(countElement.Text())
-					countParsed, err := strconv.ParseInt(countText, 10, 64)
-					if err != nil {
-						scrapeErr = fmt.Errorf("failed to parse client count: %w", err)
-						return
-					}
-					
-					// Check if this is the client we're looking for
-					// Ethernodes uses different naming conventions than our configs
-					if matchesClientName(clientNameText, clientName) {
-						clientNumber = countParsed
-						slog.Debug("Found client", "name", clientNameText, "count", clientNumber)
-					}
-				}
-			})
+			processHTMLFromSelection(e.DOM, clientName, &total, &clientNumber, &scrapeErr)
 		}
 	})
 
 	c.OnError(func(r *colly.Response, err error) {
-		// If we got a 403 Forbidden but we have data, we can still proceed
+		slog.Debug("HTTP Error", "status", r.StatusCode, "error", err, "url", r.Request.URL)
+		
+		// If we got a 403 Forbidden, try to process the response anyway
 		if r.StatusCode == 403 {
-			slog.Debug("Received 403 Forbidden, but continuing with available data")
+			slog.Debug("Received 403 Forbidden, attempting to process response body")
+			// Try to parse the response body even with 403
+			doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(r.Body)))
+			if err != nil {
+				slog.Debug("Failed to parse response body", "error", err)
+				return
+			}
+			
+			// Process the HTML manually
+			processHTML(doc, clientName, &total, &clientNumber, &scrapeErr)
 			return
 		}
 		
@@ -176,6 +140,69 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 	}
 
 	return total, clientNumber, nil
+}
+
+// processHTML extracts client data from the HTML document
+func processHTML(doc *goquery.Document, clientName configs.ClientType, total *int64, clientNumber *int64, scrapeErr *error) {
+	// Look for Execution Layer Clients section
+	doc.Find("h4").Each(func(i int, s *goquery.Selection) {
+		if strings.Contains(s.Text(), "Execution Layer Clients") {
+			processHTMLFromSelection(s, clientName, total, clientNumber, scrapeErr)
+		}
+	})
+}
+
+// processHTMLFromSelection extracts client data from a goquery selection
+func processHTMLFromSelection(s *goquery.Selection, clientName configs.ClientType, total *int64, clientNumber *int64, scrapeErr *error) {
+	slog.Debug("Found Execution Layer Clients section")
+	
+	// Find the parent container that holds all progress groups
+	parent := s.Parent()
+	
+	// Look for progress groups within this section
+	parent.Find(".progress-group").Each(func(i int, s *goquery.Selection) {
+		// Get the client name and count from the progress group header
+		header := s.Find(".progress-group-header")
+		
+		// Extract client name
+		clientNameElement := header.Find("div").First()
+		clientNameText := strings.TrimSpace(clientNameElement.Text())
+		
+		// Skip if it's the "Total" row
+		if strings.EqualFold(clientNameText, "Total") {
+			// Extract total count
+			countElement := header.Find(".fw-semibold").First()
+			if countElement.Length() > 0 {
+				totalText := strings.TrimSpace(countElement.Text())
+				totalParsed, err := strconv.ParseInt(totalText, 10, 64)
+				if err != nil {
+					*scrapeErr = fmt.Errorf("failed to parse total number: %w", err)
+					return
+				}
+				*total = totalParsed
+				slog.Debug("Found total", "total", *total)
+			}
+			return
+		}
+		
+		// Extract client count
+		countElement := header.Find(".fw-semibold").First()
+		if countElement.Length() > 0 {
+			countText := strings.TrimSpace(countElement.Text())
+			countParsed, err := strconv.ParseInt(countText, 10, 64)
+			if err != nil {
+				*scrapeErr = fmt.Errorf("failed to parse client count: %w", err)
+				return
+			}
+			
+			// Check if this is the client we're looking for
+			// Ethernodes uses different naming conventions than our configs
+			if matchesClientName(clientNameText, clientName) {
+				*clientNumber = countParsed
+				slog.Debug("Found client", "name", clientNameText, "count", *clientNumber)
+			}
+		}
+	})
 }
 
 // matchesClientName maps our client types to Ethernodes naming conventions

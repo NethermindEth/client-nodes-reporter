@@ -1,4 +1,4 @@
-name: Daily Scrape
+name: Etherenodes Scrape
 on:
 #  schedule:
 #    - cron: 0 10 * * *

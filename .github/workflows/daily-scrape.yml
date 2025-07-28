@@ -7,6 +7,13 @@ on:
       skip-update:
         type: boolean
         default: false
+      source:
+        type: choice
+        description: 'Data source to use'
+        options:
+          - ethernets
+          - ethernodes
+        default: 'ethernets'
 
 jobs:
   scrape:
@@ -27,7 +34,7 @@ jobs:
           REPORTER_SLACK_APP_TOKEN: ${{ secrets.REPORTER_SLACK_APP_TOKEN }}
           REPORTER_SLACK_CHANNEL: ${{ secrets.REPORTER_SLACK_CHANNEL }}
         run: |
-          ARGS="--debug"
+          ARGS="--debug --source ${{ inputs.source }}"
           if [ "${{ inputs.skip-update }}" = "true" ]; then
             ARGS="$ARGS --skip-update"
           fi
