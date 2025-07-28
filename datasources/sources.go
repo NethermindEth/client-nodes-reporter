@@ -10,6 +10,7 @@ type DataSourceType string
 
 const (
 	DataSourceTypeEthernets DataSourceType = "ethernets"
+	DataSourceTypeEthernodes DataSourceType = "ethernodes"
 )
 
 type ClientData struct {

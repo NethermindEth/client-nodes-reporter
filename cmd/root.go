@@ -133,6 +133,12 @@ func NewRootCmd() (*cobra.Command, error) {
 					return fmt.Errorf("failed to create ethernets data source: %w", err)
 				}
 				ctx = context.WithValue(ctx, configs.ContextKeySource, source)
+			case datasources.DataSourceTypeEthernodes:
+				source, err := datasources.NewEthernodesDataSource(nil)
+				if err != nil {
+					return fmt.Errorf("failed to create ethernodes data source: %w", err)
+				}
+				ctx = context.WithValue(ctx, configs.ContextKeySource, source)
 			default:
 				return fmt.Errorf("invalid source: \"%s\"", flags.Source)
 			}
