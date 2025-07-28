@@ -62,7 +62,7 @@ func (e EthernodesDataSource) SourceName() string {
 	return EthernodesSourceName
 }
 
-func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.ClientType) (int64, int64, error) {
+func (e EthernodesDataSource) getNumbersFromWithContent(url string, clientName configs.ClientType) (int64, int64, string, error) {
 	// Total number of clients
 	var total int64 = -1
 	var clientNumber int64 = -1
@@ -79,7 +79,7 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 	// Create request with exact same headers as working curl
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return -1, -1, fmt.Errorf("failed to create request: %w", err)
+		return -1, -1, "", fmt.Errorf("failed to create request: %w", err)
 	}
 	
 	// Set the exact same User-Agent as the working curl command
@@ -90,7 +90,8 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 	if err != nil {
 		slog.Debug("Direct HTTP request failed", "error", err)
 		// Fall back to colly if direct request fails
-		return e.getNumbersFromWithColly(url, clientName)
+		total, clientNumber, err := e.getNumbersFromWithColly(url, clientName)
+		return total, clientNumber, "", err
 	}
 	defer resp.Body.Close()
 	
@@ -100,7 +101,8 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		slog.Debug("Failed to read response body", "error", err)
-		return e.getNumbersFromWithColly(url, clientName)
+		total, clientNumber, err := e.getNumbersFromWithColly(url, clientName)
+		return total, clientNumber, "", err
 	}
 	
 	bodyStr := string(body)
@@ -109,14 +111,16 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 	// Check if we got a Cloudflare protection page
 	if strings.Contains(bodyStr, "Just a moment") || strings.Contains(bodyStr, "Cloudflare") {
 		slog.Debug("Detected Cloudflare protection page in direct request")
-		return e.getNumbersFromWithColly(url, clientName)
+		total, clientNumber, err := e.getNumbersFromWithColly(url, clientName)
+		return total, clientNumber, "", err
 	}
 	
 	// Parse the HTML using goquery
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(bodyStr))
 	if err != nil {
 		slog.Debug("Failed to parse HTML from direct request", "error", err)
-		return e.getNumbersFromWithColly(url, clientName)
+		total, clientNumber, err := e.getNumbersFromWithColly(url, clientName)
+		return total, clientNumber, "", err
 	}
 	
 	// Process the HTML
@@ -124,11 +128,12 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 	
 	if total > 0 && clientNumber > 0 {
 		slog.Debug("Successfully extracted data from direct HTTP request", "total", total, "clientNumber", clientNumber)
-		return total, clientNumber, nil
+		return total, clientNumber, bodyStr, nil
 	}
 	
 	slog.Debug("Direct HTTP request didn't yield data, trying colly fallback")
-	return e.getNumbersFromWithColly(url, clientName)
+	total, clientNumber, err = e.getNumbersFromWithColly(url, clientName)
+	return total, clientNumber, "", err
 }
 
 func (e EthernodesDataSource) getNumbersFromWithColly(url string, clientName configs.ClientType) (int64, int64, error) {
@@ -397,15 +402,17 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 
 	var total int64 = -1
 	var clientTotal int64 = -1
+	var mainPageContent string
 	var lastErr error
 
 	// Try to get data from main page first
 	for _, url := range mainURLs {
 		slog.Debug("Trying main page for total counts", "url", url)
-		overallTotal, clientNumber, err := e.getNumbersFrom(url, clientName)
+		overallTotal, clientNumber, htmlContent, err := e.getNumbersFromWithContent(url, clientName)
 		if err == nil && overallTotal > 0 && clientNumber > 0 {
 			total = overallTotal
 			clientTotal = clientNumber
+			mainPageContent = htmlContent
 			slog.Info("Successfully retrieved total counts from main page", "url", url, "total", total, "clientTotal", clientTotal)
 			break
 		}
@@ -462,7 +469,7 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 
 	// Try to get synced data from the main page HTML
 	slog.Debug("Trying to extract synced data from main page HTML")
-	mainPageSynced, err := e.getSyncedDataFromMainPage(clientName)
+	mainPageSynced, err := e.getSyncedDataFromMainPageHTML(mainPageContent, clientName)
 	if err == nil && mainPageSynced > 0 {
 		clientSynced = mainPageSynced
 		totalSynced = mainPageSynced // For now, assume client synced = total synced
@@ -738,21 +745,14 @@ func (e EthernodesDataSource) getMainPageContent(url string) (string, error) {
 	return bodyStr, nil
 }
 
-// getSyncedDataFromMainPage tries to extract synced data from the main page HTML
-func (e EthernodesDataSource) getSyncedDataFromMainPage(clientName configs.ClientType) (int64, error) {
-	// Get the main page content
-	mainPageContent, err := e.getMainPageContent("https://ethernodes.org/")
-	if err != nil {
-		slog.Debug("Failed to get main page content", "error", err)
-		return -1, fmt.Errorf("failed to get main page content: %w", err)
-	}
-	
-	slog.Debug("Parsing main page HTML for synced data")
+// getSyncedDataFromMainPageHTML tries to extract synced data from provided HTML content
+func (e EthernodesDataSource) getSyncedDataFromMainPageHTML(htmlContent string, clientName configs.ClientType) (int64, error) {
+	slog.Debug("Parsing provided HTML for synced data")
 	// Parse the HTML
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(mainPageContent))
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
 	if err != nil {
-		slog.Debug("Failed to parse main page HTML", "error", err)
-		return -1, fmt.Errorf("failed to parse main page HTML: %w", err)
+		slog.Debug("Failed to parse provided HTML", "error", err)
+		return -1, fmt.Errorf("failed to parse provided HTML: %w", err)
 	}
 	
 	slog.Debug("Searching for synced data for client", "clientName", clientName)
