@@ -72,18 +72,25 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 	// Add a delay between requests to be respectful
 	c.Limit(&colly.LimitRule{
 		DomainGlob:  "*",
-		RandomDelay: 2 * time.Second,
+		RandomDelay: 5 * time.Second,
 	})
 
 	// Set user agent and headers to avoid protection
-	c.UserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	c.UserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 	
 	c.OnRequest(func(r *colly.Request) {
 		// Add headers that might help bypass protection
-		r.Headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8")
-		r.Headers.Set("Accept-Language", "en-US,en;q=0.5")
-		r.Headers.Set("Accept-Encoding", "gzip, deflate")
-		r.Headers.Set("Connection", "keep-alive")
+		r.Headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+		r.Headers.Set("Accept-Language", "en-US,en;q=0.9")
+		r.Headers.Set("Accept-Encoding", "gzip, deflate, br")
+		r.Headers.Set("Cache-Control", "max-age=0")
+		r.Headers.Set("Sec-Ch-Ua", "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
+		r.Headers.Set("Sec-Ch-Ua-Mobile", "?0")
+		r.Headers.Set("Sec-Ch-Ua-Platform", "\"Windows\"")
+		r.Headers.Set("Sec-Fetch-Dest", "document")
+		r.Headers.Set("Sec-Fetch-Mode", "navigate")
+		r.Headers.Set("Sec-Fetch-Site", "none")
+		r.Headers.Set("Sec-Fetch-User", "?1")
 		r.Headers.Set("Upgrade-Insecure-Requests", "1")
 		
 		slog.Debug("Visiting", "url", r.URL)
@@ -107,10 +114,17 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 			
 			// Log a snippet of the response body to see what we're getting
 			bodyStr := string(r.Body)
-			if len(bodyStr) > 200 {
-				slog.Debug("Response body snippet", "snippet", bodyStr[:200])
+			if len(bodyStr) > 500 {
+				slog.Debug("Response body snippet", "snippet", bodyStr[:500])
 			} else {
 				slog.Debug("Response body", "body", bodyStr)
+			}
+			
+			// Check if we got a Cloudflare protection page
+			if strings.Contains(bodyStr, "Just a moment") || strings.Contains(bodyStr, "Cloudflare") {
+				slog.Debug("Detected Cloudflare protection page - this source may not be accessible")
+				// Don't try to process Cloudflare protection pages
+				return
 			}
 			
 			// Try to parse the response body even with 403
@@ -151,6 +165,10 @@ func (e EthernodesDataSource) getNumbersFrom(url string, clientName configs.Clie
 	}
 	
 	if visitErr != nil {
+		// Check if this is likely a Cloudflare protection issue
+		if strings.Contains(visitErr.Error(), "Forbidden") {
+			return -1, -1, fmt.Errorf("access denied by Cloudflare protection - ethernodes.org may not be accessible via automated requests")
+		}
 		return -1, -1, visitErr
 	}
 
