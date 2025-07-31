@@ -34,7 +34,8 @@ jobs:
           REPORTER_SLACK_APP_TOKEN: ${{ secrets.REPORTER_SLACK_APP_TOKEN }}
           REPORTER_SLACK_CHANNEL: ${{ secrets.REPORTER_SLACK_CHANNEL }}
         run: |
-          ARGS="--debug --source ${{ inputs.source }}"
+          SOURCE="${{ inputs.source || 'ethernets' }}"
+          ARGS="--debug --source $SOURCE"
           if [ "${{ inputs.skip-update }}" = "true" ]; then
             ARGS="$ARGS --skip-update"
           fi
