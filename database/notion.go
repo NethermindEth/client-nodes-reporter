@@ -2,6 +2,7 @@ package database
 
 import (
 	"fmt"
+	"log/slog"
 
 	"github.com/jomei/notionapi"
 
@@ -72,12 +73,11 @@ func ClientDataToPageProperties(clientData datasources.ClientData) (notionapi.Pr
 
 	pageProperties[PropertyNameKey] = BuildTitleProperty(fmt.Sprintf("%s-%s", clientData.Source, clientData.ClientName))
 	pageProperties[PropertySourceKey] = BuildSelectProperty(clientData.Source)
-	
-	// Map client names to Notion database values
-	clientName := string(clientData.ClientName) // Use lowercase as stored in configs
-	fmt.Printf("DEBUG: Client name being sent to Notion: '%s' (type: %T)\n", clientName, clientData.ClientName)
+
+	clientName := string(clientData.ClientName)
+	slog.Debug("Notion client name", "name", clientName)
 	pageProperties[PropertyClientTypeKey] = BuildSelectProperty(clientName)
-	
+
 	pageProperties[PropertyTotalKey] = BuildNumberProperty(float64(clientData.Total))
 	pageProperties[PropertyClientTotalKey] = BuildNumberProperty(float64(clientData.ClientTotal))
 	pageProperties[PropertyTotalSyncedKey] = BuildNumberProperty(float64(clientData.TotalSynced))

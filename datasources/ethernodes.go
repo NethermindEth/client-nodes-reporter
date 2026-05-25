@@ -1,6 +1,8 @@
 package datasources
 
 import (
+	"bytes"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +17,26 @@ import (
 
 	"client-nodes-reporter/configs"
 )
+
+// readMaybeGzip reads a response body, decompressing it when the server
+// returned Content-Encoding: gzip. net/http only auto-decompresses when
+// the caller did NOT set Accept-Encoding explicitly — code paths that set
+// it manually (to look browser-like for Cloudflare) must decompress here.
+func readMaybeGzip(resp *http.Response) ([]byte, error) {
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(resp.Header.Get("Content-Encoding"), "gzip") {
+		return raw, nil
+	}
+	gr, err := gzip.NewReader(bytes.NewReader(raw))
+	if err != nil {
+		return nil, fmt.Errorf("gzip reader: %w", err)
+	}
+	defer gr.Close()
+	return io.ReadAll(gr)
+}
 
 const EthernodesSourceName = "Ethernodes"
 
@@ -423,57 +445,26 @@ func (e EthernodesDataSource) GetClientData(clientName configs.ClientType) (Clie
 		return ClientData{}, fmt.Errorf("failed to get total counts from any ethernodes.org endpoint: %w", lastErr)
 	}
 
-	// Declare synced variables for both success and fallback cases
-	var clientSynced int64
-	var totalSynced int64
-
-	// Now try to get synced/unsynced data from client endpoints
-	slog.Debug("Trying client-specific endpoints for synced data")
-	syncedCount, unsyncedCount, err := e.getSyncedUnsyncedDataFromClientEndpoints(clientName)
-	if err == nil {
-		// Check if the client endpoints are returning complete data
-		clientEndpointTotal := syncedCount + unsyncedCount
-		slog.Debug("Client endpoint totals", "synced", syncedCount, "unsynced", unsyncedCount, "total", clientEndpointTotal, "expectedTotal", clientTotal)
-		
-		if clientEndpointTotal >= clientTotal*9/10 { // If we got at least 90% of expected total
-			// Use the synced count directly from the client endpoint
-			clientSynced = syncedCount
-			totalSynced = syncedCount // For now, assume client synced = total synced
-
-			slog.Info("Successfully retrieved data using main page totals + client endpoint synced data", 
-				"client", clientName, 
-				"clientTotal", clientTotal, 
-				"clientSynced", clientSynced,
-				"overallTotal", total,
-				"overallSynced", totalSynced,
-				"syncedFromEndpoint", syncedCount,
-				"unsyncedFromEndpoint", unsyncedCount)
-
-			return ClientData{
-				Source:       string(e.SourceType()),
-				ClientName:   clientName,
-				Total:        total,
-				ClientTotal:  clientTotal,
-				TotalSynced:  totalSynced,
-				ClientSynced: clientSynced,
-				CreatedAt:    time.Now(),
-			}, nil
-		} else {
-			slog.Debug("Client endpoints returned incomplete data, falling back to main page", 
-				"endpointTotal", clientEndpointTotal, 
-				"expectedTotal", clientTotal)
-		}
+	// Per-client synced count from /client/el/<name>?synced=1.
+	clientSynced, err := e.getClientSyncedCount(clientName)
+	if err != nil {
+		return ClientData{}, fmt.Errorf("failed to get client synced count: %w", err)
+	}
+	if clientSynced > clientTotal {
+		// Defensive: cap at clientTotal so downstream math stays sensible.
+		slog.Warn("clientSynced exceeds clientTotal, capping", "clientSynced", clientSynced, "clientTotal", clientTotal)
+		clientSynced = clientTotal
 	}
 
-	// The main page doesn't contain synced data in a parseable format
-	// Use fallback with estimated synced percentage based on typical sync rates
-	slog.Debug("Using fallback with estimated synced percentage")
-	clientSynced = int64(float64(clientTotal) * 0.85) // Assume 85% synced (closer to actual)
-	totalSynced = int64(float64(total) * 0.85)
+	// Overall EL synced count from /sync.
+	totalSynced, err := e.getOverallExecutionLayerSynced()
+	if err != nil {
+		return ClientData{}, fmt.Errorf("failed to get overall synced count: %w", err)
+	}
 
-	slog.Info("Retrieved data from Ethernodes main page (fallback)", 
-		"client", clientName, 
-		"clientTotal", clientTotal, 
+	slog.Info("Successfully retrieved ethernodes data",
+		"client", clientName,
+		"clientTotal", clientTotal,
 		"clientSynced", clientSynced,
 		"overallTotal", total,
 		"overallSynced", totalSynced)
@@ -629,296 +620,59 @@ func (e EthernodesDataSource) getClientCountFromURL(url string) (int64, error) {
 	return -1, fmt.Errorf("could not extract count from URL: %s", url)
 }
 
-// getSyncedUnsyncedDataFromClientEndpoints gets both synced and unsynced data from client endpoints
-func (e EthernodesDataSource) getSyncedUnsyncedDataFromClientEndpoints(clientName configs.ClientType) (int64, int64, error) {
-	// Map client names to Ethernodes URL format
+// getClientSyncedCount returns the count of synced nodes for one client, as
+// reported by https://ethernodes.org/client/el/<name>?synced=1.
+// (?synced=0 also exists but does not filter — it returns the same page as no
+// query parameter, so we ignore it and derive unsynced = total - synced.)
+func (e EthernodesDataSource) getClientSyncedCount(clientName configs.ClientType) (int64, error) {
 	clientURLName := e.getClientURLName(clientName)
 	if clientURLName == "" {
-		return -1, -1, fmt.Errorf("unsupported client: %s", clientName)
+		return -1, fmt.Errorf("unsupported client: %s", clientName)
 	}
 
-	// Try to get synced and unsynced data with enhanced headers
 	syncedURL := fmt.Sprintf("https://ethernodes.org/client/el/%s?synced=1", clientURLName)
-	unsyncedURL := fmt.Sprintf("https://ethernodes.org/client/el/%s?synced=0", clientURLName)
-
-	slog.Debug("Trying to get synced data with enhanced headers", "url", syncedURL)
-	syncedCount, err := e.getClientCountWithEnhancedHeaders(syncedURL)
-	if err != nil {
-		return -1, -1, fmt.Errorf("failed to get synced data: %w", err)
-	}
-
-	slog.Debug("Trying to get unsynced data with enhanced headers", "url", unsyncedURL)
-	unsyncedCount, err := e.getClientCountWithEnhancedHeaders(unsyncedURL)
-	if err != nil {
-		return -1, -1, fmt.Errorf("failed to get unsynced data: %w", err)
-	}
-
-	slog.Debug("Successfully got synced/unsynced data from client endpoints", 
-		"client", clientName, 
-		"synced", syncedCount, 
-		"unsynced", unsyncedCount)
-
-	return syncedCount, unsyncedCount, nil
+	slog.Debug("Fetching client synced count", "url", syncedURL)
+	return e.getClientCountWithEnhancedHeaders(syncedURL)
 }
 
-// getTotalDataFromClientEndpoints gets total data from client endpoints
-func (e EthernodesDataSource) getTotalDataFromClientEndpoints(clientName configs.ClientType) (int64, int64, error) {
-	// Map client names to Ethernodes URL format
-	clientURLName := e.getClientURLName(clientName)
-	if clientURLName == "" {
-		return -1, -1, fmt.Errorf("unsupported client: %s", clientName)
-	}
+// getOverallExecutionLayerSynced returns the overall synced EL node count from
+// https://ethernodes.org/sync (the "Execution Layer Sync Status" section).
+func (e EthernodesDataSource) getOverallExecutionLayerSynced() (int64, error) {
+	const syncURL = "https://ethernodes.org/sync"
+	slog.Debug("Fetching overall execution-layer synced count", "url", syncURL)
 
-	// Try to get total data from client endpoint without synced parameter
-	totalURL := fmt.Sprintf("https://ethernodes.org/client/el/%s", clientURLName)
-
-	slog.Debug("Trying to get total data from client endpoint", "url", totalURL)
-	totalCount, err := e.getClientCountWithEnhancedHeaders(totalURL)
+	body, err := e.fetchWithEnhancedHeaders(syncURL)
 	if err != nil {
-		return -1, -1, fmt.Errorf("failed to get total data: %w", err)
+		return -1, err
+	}
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(body)))
+	if err != nil {
+		return -1, fmt.Errorf("parse /sync HTML: %w", err)
 	}
 
-	// For now, assume client total equals total count
-	// We could refine this later if needed
-	clientTotal := totalCount
-
-	slog.Debug("Successfully got total data from client endpoint", 
-		"client", clientName, 
-		"clientTotal", clientTotal, 
-		"total", totalCount)
-
-	return clientTotal, totalCount, nil
+	// The page has two sections (Execution Layer, Consensus Layer), each with
+	// progress-groups labelled Total/Synced/Syncing. The first "Synced" group
+	// in DOM order belongs to Execution Layer.
+	count := findProgressGroupTotal(doc, "synced")
+	if count <= 0 {
+		return -1, fmt.Errorf("could not extract synced count from %s", syncURL)
+	}
+	return count, nil
 }
 
-// getMainPageContent gets the raw HTML content from a URL
-func (e EthernodesDataSource) getMainPageContent(url string) (string, error) {
-	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-	
-	// Create request with exact same headers as working curl
+// fetchWithEnhancedHeaders performs the same browser-like GET that
+// getClientCountWithEnhancedHeaders does, but returns the decompressed body so
+// other scrapers can reuse the bypass.
+func (e EthernodesDataSource) fetchWithEnhancedHeaders(url string) ([]byte, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("create request: %w", err)
 	}
-	
-	// Set the exact same User-Agent as the working curl command
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	
-	// Make the request
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	
-	// Read the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	
-	bodyStr := string(body)
-	
-	// Check if we got a Cloudflare protection page
-	if strings.Contains(bodyStr, "Just a moment") || strings.Contains(bodyStr, "Cloudflare") {
-		return "", fmt.Errorf("cloudflare protection detected")
-	}
-	
-	return bodyStr, nil
-}
-
-// getSyncedDataFromMainPageHTML tries to extract synced data from provided HTML content
-func (e EthernodesDataSource) getSyncedDataFromMainPageHTML(htmlContent string, clientName configs.ClientType, clientTotal int64) (int64, error) {
-	slog.Debug("Parsing provided HTML for synced data")
-	// Parse the HTML
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlContent))
-	if err != nil {
-		slog.Debug("Failed to parse provided HTML", "error", err)
-		return -1, fmt.Errorf("failed to parse provided HTML: %w", err)
-	}
-	
-	slog.Debug("Searching for synced data for client", "clientName", clientName)
-	// Look for synced data in the HTML structure
-	// Try different selectors that might contain synced information
-	selectors := []string{
-		".synced-count",
-		".synced .number", 
-		".progress-group .synced",
-		".client-synced",
-		"[data-synced]",
-		".status-synced",
-		".synced",
-		".status",
-		".node-status",
-		".client-status",
-		".sync-status",
-		".progress-bar",
-		".progress",
-		".badge",
-		".label",
-		".tag",
-		"[class*='synced']",
-		"[class*='status']",
-		"[class*='sync']",
-	}
-	
-	var foundSyncedCount int64 = -1
-	
-	for _, selector := range selectors {
-		slog.Debug("Trying selector", "selector", selector)
-		doc.Find(selector).Each(func(i int, s *goquery.Selection) {
-			if foundSyncedCount > 0 {
-				return
-			}
-			// Check if this element is related to our client
-			parent := s.Parent()
-			parentText := parent.Text()
-			slog.Debug("Selector match", "selector", selector, "elementText", s.Text(), "parentText", parentText)
-			if parent.Length() > 0 {
-				// Look for client name in parent elements
-				if strings.Contains(strings.ToLower(parentText), strings.ToLower(string(clientName))) {
-					syncedText := strings.TrimSpace(s.Text())
-					slog.Debug("Found potential synced data for client", "selector", selector, "text", syncedText)
-					// Try to extract number
-					syncedCount, err := strconv.ParseInt(syncedText, 10, 64)
-					if err == nil && syncedCount > 0 {
-						slog.Debug("Successfully extracted synced count from main page", "count", syncedCount)
-						foundSyncedCount = syncedCount
-					} else {
-						slog.Debug("Failed to parse synced count", "text", syncedText, "error", err)
-					}
-				}
-			}
-		})
-		if foundSyncedCount > 0 {
-			break
-		}
-	}
-	
-	// If no specific synced data found, try to look for it in the progress groups
-	if foundSyncedCount <= 0 {
-		doc.Find(".progress-group").Each(func(i int, s *goquery.Selection) {
-			if foundSyncedCount > 0 {
-				return
-			}
-			clientNameElement := s.Find(".client-name, .progress-group-header div")
-			clientNameText := strings.ToLower(strings.TrimSpace(clientNameElement.Text()))
-			slog.Debug("Progress group", "clientNameText", clientNameText)
-			if clientNameElement.Length() > 0 && matchesClientName(clientNameText, clientName) {
-				slog.Debug("Matched progress group for client", "clientName", clientName)
-				syncedElement := s.Find(".synced, .status, [data-status='synced']")
-				slog.Debug("Progress group synced element count", "count", syncedElement.Length())
-				if syncedElement.Length() > 0 {
-					syncedText := strings.TrimSpace(syncedElement.Text())
-					slog.Debug("Found synced data in progress group", "text", syncedText)
-					syncedCount, err := strconv.ParseInt(syncedText, 10, 64)
-					if err == nil && syncedCount > 0 {
-						slog.Debug("Successfully extracted synced count from progress group", "count", syncedCount)
-						foundSyncedCount = syncedCount
-					} else {
-						slog.Debug("Failed to parse synced count in progress group", "text", syncedText, "error", err)
-					}
-				}
-			}
-		})
-	}
-	
-	// If still no synced data found, try to extract from JavaScript data
-	if foundSyncedCount <= 0 {
-		slog.Debug("Trying to extract synced data from JavaScript data")
-		// Look for script tags that might contain synced data
-		doc.Find("script").Each(func(i int, s *goquery.Selection) {
-			if foundSyncedCount > 0 {
-				return
-			}
-			
-			scriptContent := s.Text()
-			if strings.Contains(scriptContent, "piechartdatael") && strings.Contains(scriptContent, "nethermind") {
-				slog.Debug("Found piechart data script", "content", scriptContent[:200])
-				
-				// Look for the nethermind entry in the piechart data
-				nethermindPattern := regexp.MustCompile(`"name":"nethermind","y":(\d+)`)
-				matches := nethermindPattern.FindStringSubmatch(scriptContent)
-				if len(matches) > 1 {
-					if parsed, err := strconv.ParseInt(matches[1], 10, 64); err == nil && parsed > 0 {
-						slog.Debug("Found nethermind data in piechart", "count", parsed)
-						// This is the total, not synced, but let's see if we can find synced data
-					}
-				}
-			}
-		})
-	}
-	
-	// If still no synced data found, try a more targeted search for specific patterns
-	if foundSyncedCount <= 0 {
-		slog.Debug("Trying targeted search for synced patterns")
-		// Look for specific patterns that might indicate synced data
-		doc.Find("*").Each(func(i int, s *goquery.Selection) {
-			if foundSyncedCount > 0 {
-				return
-			}
-			
-			elementText := strings.ToLower(strings.TrimSpace(s.Text()))
-			
-			// Look for very specific patterns that indicate synced data
-			syncedPatterns := []string{
-				"synced nodes",
-				"nodes synced", 
-				"synced:",
-				"sync status",
-				"status: synced",
-			}
-			
-			for _, pattern := range syncedPatterns {
-				if strings.Contains(elementText, pattern) && strings.Contains(elementText, strings.ToLower(string(clientName))) {
-					slog.Debug("Found specific synced pattern", "pattern", pattern, "text", elementText)
-					
-					// Extract numbers near this pattern
-					re := regexp.MustCompile(`(\d{1,3}(?:,\d{3})*)`)
-					matches := re.FindStringSubmatch(elementText)
-					if len(matches) > 1 {
-						cleanMatch := strings.ReplaceAll(matches[1], ",", "")
-						if parsed, err := strconv.ParseInt(cleanMatch, 10, 64); err == nil && parsed > 0 {
-							// More strict validation for synced data
-							if parsed < clientTotal && parsed > clientTotal/5 && parsed > 500 {
-								slog.Debug("Found potential synced count with specific pattern", "count", parsed, "pattern", pattern, "text", elementText)
-								foundSyncedCount = parsed
-								break
-							}
-						}
-					}
-				}
-			}
-		})
-	}
-	if foundSyncedCount > 0 {
-		slog.Debug("Returning found synced count", "count", foundSyncedCount)
-		return foundSyncedCount, nil
-	}
-	slog.Debug("No synced data found for client", "clientName", clientName)
-	return -1, fmt.Errorf("no synced data found for client %s", clientName)
-}
-
-// getClientCountWithEnhancedHeaders tries to get client count with more aggressive headers
-func (e EthernodesDataSource) getClientCountWithEnhancedHeaders(url string) (int64, error) {
-	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-	
-	// Create request with enhanced headers
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return -1, fmt.Errorf("failed to create request: %w", err)
-	}
-	
-	// Set enhanced headers to bypass Cloudflare
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
 	req.Header.Set("Cache-Control", "no-cache")
 	req.Header.Set("Pragma", "no-cache")
 	req.Header.Set("Sec-Ch-Ua", "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
@@ -930,96 +684,72 @@ func (e EthernodesDataSource) getClientCountWithEnhancedHeaders(url string) (int
 	req.Header.Set("Sec-Fetch-User", "?1")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
 	req.Header.Set("Referer", "https://ethernodes.org/")
-	
-	// Make the request
+
 	resp, err := client.Do(req)
 	if err != nil {
-		slog.Debug("Enhanced headers request failed", "error", err)
-		return -1, err
+		return nil, err
 	}
 	defer resp.Body.Close()
-	
-	slog.Debug("Enhanced headers request successful", "status", resp.StatusCode, "contentLength", resp.ContentLength)
-	
-	// Read the response body
-	body, err := io.ReadAll(resp.Body)
+
+	body, err := readMaybeGzip(resp)
 	if err != nil {
-		slog.Debug("Failed to read response body", "error", err)
+		return nil, err
+	}
+	if strings.Contains(string(body), "Just a moment") || strings.Contains(string(body), "cf-browser-verification") {
+		return nil, fmt.Errorf("cloudflare protection detected at %s", url)
+	}
+	return body, nil
+}
+
+
+// getClientCountWithEnhancedHeaders fetches one of the per-client Ethernodes
+// pages and extracts the "Total" count from its first .progress-group.
+func (e EthernodesDataSource) getClientCountWithEnhancedHeaders(url string) (int64, error) {
+	body, err := e.fetchWithEnhancedHeaders(url)
+	if err != nil {
 		return -1, err
 	}
-	
-	bodyStr := string(body)
-	slog.Debug("Response body length", "length", len(bodyStr))
-	
-	// Check if we got a Cloudflare protection page
-	if strings.Contains(bodyStr, "Just a moment") || strings.Contains(bodyStr, "Cloudflare") {
-		slog.Debug("Detected Cloudflare protection page with enhanced headers")
-		return -1, fmt.Errorf("cloudflare protection detected")
-	}
-	
-	// Parse the HTML using goquery
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(bodyStr))
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(body)))
 	if err != nil {
-		slog.Debug("Failed to parse HTML from enhanced headers request", "error", err)
-		return -1, err
+		return -1, fmt.Errorf("parse HTML from %s: %w", url, err)
 	}
-	
-	// Look for the count in the page - try multiple strategies
-	var count int64 = -1
-	
-	// Strategy 1: Look for specific selectors
-	selectors := []string{
-		".node-count",
-		".count",
-		"h1",
-		".stats-number",
-		"[data-count]",
-		".badge",
-		".number",
-	}
-	
-	for _, selector := range selectors {
-		doc.Find(selector).Each(func(i int, s *goquery.Selection) {
-			text := strings.TrimSpace(s.Text())
-			// Extract numbers from the text
-			re := regexp.MustCompile(`(\d{1,3}(?:,\d{3})*)`)
-			matches := re.FindStringSubmatch(text)
-			if len(matches) > 1 {
-				cleanMatch := strings.ReplaceAll(matches[1], ",", "")
-				if parsed, err := strconv.ParseInt(cleanMatch, 10, 64); err == nil && parsed > 0 {
-					count = parsed
-					slog.Debug("Found count from selector", "selector", selector, "text", text, "count", count)
-					return
-				}
-			}
-		})
-		if count > 0 {
-			break
-		}
-	}
-	
-	// Strategy 2: Look for any large numbers in the page
+	count := findProgressGroupTotal(doc, "total")
 	if count <= 0 {
-		doc.Find("body").Each(func(i int, s *goquery.Selection) {
-			text := s.Text()
-			re := regexp.MustCompile(`\b(\d{1,3}(?:,\d{3})*)\b`)
-			matches := re.FindAllString(text, -1)
-			for _, match := range matches {
-				cleanMatch := strings.ReplaceAll(match, ",", "")
-				if parsed, err := strconv.ParseInt(cleanMatch, 10, 64); err == nil && parsed > 0 {
-					// Prefer larger numbers as they're more likely to be the count
-					if parsed > count {
-						count = parsed
-					}
-				}
-			}
-		})
+		return -1, fmt.Errorf("could not extract count from %s", url)
 	}
-	
-	if count > 0 {
-		slog.Debug("Successfully extracted count with enhanced headers", "url", url, "count", count)
-		return count, nil
-	}
-	
-	return -1, fmt.Errorf("could not extract count from URL: %s", url)
+	slog.Debug("Successfully extracted count with enhanced headers", "url", url, "count", count)
+	return count, nil
+}
+
+// findProgressGroupTotal locates the count value displayed alongside a labelled
+// row inside a Bootstrap-style `.progress-group` block. The Ethernodes per-client
+// pages render their headline numbers as:
+//
+//	<div class="progress-group">
+//	  <div class="progress-group-header ...">
+//	    <div>Total</div>
+//	    <div class="ms-auto fw-semibold me-2">1396</div>
+//	  </div>
+//	</div>
+//
+// Pass `labelLower` lowercased (e.g. "total", "synced", "syncing").
+func findProgressGroupTotal(doc *goquery.Document, labelLower string) int64 {
+	var count int64 = -1
+	doc.Find(".progress-group").EachWithBreak(func(_ int, pg *goquery.Selection) bool {
+		header := pg.Find(".progress-group-header").First()
+		if header.Length() == 0 {
+			return true
+		}
+		if !strings.Contains(strings.ToLower(header.Text()), labelLower) {
+			return true
+		}
+		text := strings.TrimSpace(header.Find(".fw-semibold").First().Text())
+		cleaned := strings.ReplaceAll(text, ",", "")
+		if parsed, err := strconv.ParseInt(cleaned, 10, 64); err == nil && parsed > 0 {
+			count = parsed
+			return false
+		}
+		return true
+	})
+	return count
 } 

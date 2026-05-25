@@ -96,6 +96,13 @@ func NewRootCmd() (*cobra.Command, error) {
 			// Configure debug mode
 			ctx = context.WithValue(ctx, configs.ContextKeyDebug, flags.Debug)
 
+			// Allow REPORTER_LOG_FORMAT to override when the flag was not set.
+			if !cmd.PersistentFlags().Changed("log-format") {
+				if v := viper.GetString("log_format"); v != "" {
+					flags.LogsFormat = v
+				}
+			}
+
 			// Configure logger
 			loggerLevel := slog.LevelInfo
 			if flags.Debug {
@@ -234,10 +241,11 @@ func NewRootCmd() (*cobra.Command, error) {
 	rootCmd.PersistentFlags().BoolVarP(&flags.Debug, "debug", "d", false, "enable debug logging")
 
 	// Logs
-	rootCmd.PersistentFlags().StringVarP(&flags.LogsFormat, "log-format", "f", "text", "logs format (json, text)")
+	viper.BindEnv("log_format")
+	rootCmd.PersistentFlags().StringVarP(&flags.LogsFormat, "log-format", "f", "json", "logs format (json, text). environment variable: REPORTER_LOG_FORMAT")
 
 	// Source
-	rootCmd.PersistentFlags().StringVarP(&flags.Source, "source", "s", string(datasources.DataSourceTypeEthernets), "source of the client nodes")
+	rootCmd.PersistentFlags().StringVarP(&flags.Source, "source", "s", string(datasources.DataSourceTypeEthernodes), "source of the client nodes (ethernodes, ethernets)")
 	// Client
 	rootCmd.PersistentFlags().StringVarP(&flags.Client, "client", "c", string(configs.ClientTypeNethermind), "client name")
 
