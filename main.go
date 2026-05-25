@@ -5,6 +5,8 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
@@ -14,7 +16,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := cmd.ExecuteContext(context.Background()); err != nil {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := cmd.ExecuteContext(ctx); err != nil {
 		slog.Error("Failed to execute command", "error", err)
 		os.Exit(1)
 	}
