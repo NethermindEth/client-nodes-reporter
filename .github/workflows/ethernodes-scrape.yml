@@ -22,7 +22,7 @@ jobs:
       fail-fast: false
       max-parallel: 1
       matrix:
-        client: [nethermind, geth, besu, erigon, reth]
+        client: [nethermind]
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@v3
