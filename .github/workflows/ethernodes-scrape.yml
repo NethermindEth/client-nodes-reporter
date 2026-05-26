@@ -1,0 +1,51 @@
+name: Ethernodes Scrape
+
+on:
+  schedule:
+    - cron: '0 10 * * *'
+  workflow_dispatch:
+    inputs:
+      skip-update:
+        description: Skip Notion write; only post a Slack message from cached history
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  scrape:
+    name: Scrape ${{ matrix.client }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        client: [nethermind, geth, besu, erigon, reth]
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run client-nodes-reporter (${{ matrix.client }})
+        env:
+          REPORTER_NOTION_DB: ${{ secrets.REPORTER_NOTION_DB }}
+          REPORTER_NOTION_TOKEN: ${{ secrets.REPORTER_NOTION_TOKEN }}
+          REPORTER_SLACK_APP_TOKEN: ${{ secrets.REPORTER_SLACK_APP_TOKEN }}
+          REPORTER_SLACK_CHANNEL: core-budget-alerts
+          SKIP_UPDATE_FLAG: ${{ inputs.skip-update == true && '--skip-update' || '' }}
+        run: |
+          docker run --rm \
+            -e REPORTER_NOTION_DB \
+            -e REPORTER_NOTION_TOKEN \
+            -e REPORTER_SLACK_APP_TOKEN \
+            -e REPORTER_SLACK_CHANNEL \
+            ghcr.io/nethermindeth/client-nodes-reporter:latest \
+            --debug \
+            --source ethernodes \
+            --client ${{ matrix.client }} \
+            $SKIP_UPDATE_FLAG
