@@ -6,7 +6,7 @@ A small Go CLI that:
 2. Records one row per run in a Notion database,
 3. Posts a Slack message summarising today's count and a 35-day trend chart (rendered via QuickChart).
 
-It is designed to be run as a one-shot job — locally, in a container, or as a Kubernetes CronJob.
+It is designed to be run as a one-shot job — locally, in a container, or as a GitHub Actions scheduled workflow.
 
 ## Architecture
 
@@ -61,43 +61,13 @@ docker run --rm --env-file .env \
   --client nethermind --source ethernodes
 ```
 
-## Running as a Kubernetes CronJob
+## Running on a schedule (GitHub Actions)
 
-The image's entrypoint is the `reporter` binary, so K8s passes CLI args via `args:` and configuration via environment variables (Secret + ConfigMap). One CronJob per client is the recommended pattern — the binary scrapes one client per invocation.
+The repo ships a workflow at `.github/workflows/ethernodes-scrape.yml` that runs the published image once per client per day (10:00 UTC, matrix over `nethermind`, `geth`, `besu`, `erigon`, `reth`) and can be triggered manually with a `skip-update` toggle.
 
-```yaml
-apiVersion: batch/v1
-kind: CronJob
-metadata:
-  name: client-nodes-reporter-nethermind
-spec:
-  schedule: "0 10 * * *"   # 10:00 UTC daily
-  concurrencyPolicy: Forbid
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
-  jobTemplate:
-    spec:
-      backoffLimit: 2
-      template:
-        spec:
-          restartPolicy: OnFailure
-          containers:
-            - name: reporter
-              image: ghcr.io/nethermindeth/client-nodes-reporter:latest
-              args:
-                - --client=nethermind
-                - --source=ethernodes
-              envFrom:
-                - secretRef:
-                    name: client-nodes-reporter-secrets   # REPORTER_NOTION_TOKEN, REPORTER_SLACK_APP_TOKEN
-                - configMapRef:
-                    name: client-nodes-reporter-config    # REPORTER_NOTION_DB, REPORTER_SLACK_CHANNEL
-```
+This runs on GitHub-hosted runners on purpose: `ethernodes.org` sits behind Cloudflare, and Cloudflare currently blocks requests from common datacenter egress IPs (the AWS/OVH ranges used by self-hosted Kubernetes clusters in particular). The GitHub Actions runner IP ranges are the only egress we've found that reliably gets through without a paid residential proxy. Until that changes, running the binary on a schedule from anywhere other than GH Actions is not recommended.
 
-Notes:
-- The image is published under the org `nethermindeth` on GHCR. GHCR images are private by default; either flip visibility to public or attach `imagePullSecrets` referencing a GHCR PAT.
-- The binary exits non-zero on any failure (Cobra propagates the error from `RunE`). `backoffLimit: 2` will retry twice before the Job is marked failed.
-- The process responds to SIGTERM by cancelling its root context, so K8s can drain pods cleanly during deletes.
+The workflow expects these secrets to be set on the repo: `REPORTER_NOTION_DB`, `REPORTER_NOTION_TOKEN`, `REPORTER_SLACK_APP_TOKEN`. The Slack channel is hardcoded in the workflow.
 
 ## Data sources
 
@@ -131,5 +101,6 @@ For the workflow to push to GHCR, the repo must have **Settings → Actions → 
 
 - `--max-retries` and `--retry-delay` flags exist but are not wired through into the scrapers.
 - The `ethernets` data source is broken and not currently being repaired.
-- No automated tests. Selector drift on ethernodes.org will only surface as a failed K8s Job; if the Slack message stops appearing, run the binary locally with `--debug` to see which step failed.
+- No automated tests. Selector drift on ethernodes.org will only surface as a failed workflow run; if the Slack message stops appearing, run the binary locally with `--debug` to see which step failed.
+- Scraping from datacenter egress IPs (e.g. self-hosted Kubernetes on AWS/OVH) is currently blocked by Cloudflare. The GitHub Actions runner IPs are the only egress that reliably gets through; reviving a K8s deployment would require routing through a residential proxy or a Cloudflare-bypass service such as FlareSolverr.
 - The ethernodes scraper only requests gzip+deflate (not brotli) to avoid pulling in a brotli decoder. Cloudflare currently honours this; if it ever stops, add `github.com/andybalholm/brotli` and teach `readMaybeGzip` about `Content-Encoding: br`.
