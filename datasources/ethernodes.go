@@ -44,6 +44,11 @@ type EthernodesDataSourceOptions struct {
 	BaseURL           string
 	MaxRetries        int
 	InitialRetryDelay time.Duration
+	// FlareSolverrURL, when non-empty, routes all outbound fetches through a
+	// FlareSolverr v1 endpoint (e.g. "http://localhost:8191/v1"). When set, the
+	// colly fallback is intentionally bypassed so a FlareSolverr failure is
+	// surfaced loudly instead of silently masked.
+	FlareSolverrURL string
 }
 
 type EthernodesDataSource struct {
@@ -71,9 +76,79 @@ func NewEthernodesDataSource(cfg *EthernodesDataSourceOptions) (*EthernodesDataS
 		} else {
 			config.InitialRetryDelay = cfg.InitialRetryDelay
 		}
+		config.FlareSolverrURL = cfg.FlareSolverrURL
 	}
 
 	return &EthernodesDataSource{config: config}, nil
+}
+
+// fetchHTML returns the HTML body for url. When FlareSolverrURL is configured,
+// the request is proxied through FlareSolverr (real headless Chromium, correct
+// TLS fingerprint, JS challenges solved). Otherwise it does the direct browser-
+// shaped GET that the colly-less code paths historically did.
+//
+// The Cloudflare-block detection lives here so it covers both paths: if the
+// FlareSolverr-fronted response *still* contains a CF block page, we want to
+// fail loudly rather than parse garbage downstream.
+func (e EthernodesDataSource) fetchHTML(url string) ([]byte, error) {
+	if e.config.FlareSolverrURL != "" {
+		body, upstreamStatus, err := fetchViaFlareSolverr(e.config.FlareSolverrURL, url)
+		if err != nil {
+			return nil, err
+		}
+		if upstreamStatus < 200 || upstreamStatus >= 300 {
+			return nil, fmt.Errorf("ethernodes returned HTTP %d via flaresolverr", upstreamStatus)
+		}
+		if isCloudflareBlock(body) {
+			return nil, fmt.Errorf("cloudflare protection still tripping through flaresolverr at %s", url)
+		}
+		return []byte(body), nil
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "gzip, deflate")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
+	req.Header.Set("Sec-Ch-Ua", "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
+	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
+	req.Header.Set("Sec-Ch-Ua-Platform", "\"macOS\"")
+	req.Header.Set("Sec-Fetch-Dest", "document")
+	req.Header.Set("Sec-Fetch-Mode", "navigate")
+	req.Header.Set("Sec-Fetch-Site", "none")
+	req.Header.Set("Sec-Fetch-User", "?1")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
+	req.Header.Set("Referer", "https://ethernodes.org/")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := readMaybeGzip(resp)
+	if err != nil {
+		return nil, err
+	}
+	if isCloudflareBlock(string(body)) {
+		return nil, fmt.Errorf("cloudflare protection detected at %s", url)
+	}
+	return body, nil
+}
+
+// isCloudflareBlock returns true if the response body looks like a Cloudflare
+// challenge or block page. Pre-existing call sites checked these substrings
+// inline; centralizing them keeps the FlareSolverr and direct paths in sync.
+func isCloudflareBlock(body string) bool {
+	return strings.Contains(body, "Just a moment") ||
+		strings.Contains(body, "cf-browser-verification") ||
+		strings.Contains(body, "Cloudflare")
 }
 
 func (e EthernodesDataSource) SourceType() DataSourceType {
@@ -85,77 +160,50 @@ func (e EthernodesDataSource) SourceName() string {
 }
 
 func (e EthernodesDataSource) getNumbersFromWithContent(url string, clientName configs.ClientType) (int64, int64, string, error) {
-	// Total number of clients
 	var total int64 = -1
 	var clientNumber int64 = -1
 	var scrapeErr error
 
-	// Try direct HTTP request first (like curl)
-	slog.Debug("Trying direct HTTP request like curl", "url", url)
-	
-	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
-	
-	// Create request with exact same headers as working curl
-	req, err := http.NewRequest("GET", url, nil)
+	slog.Debug("Fetching ethernodes main page", "url", url, "viaFlareSolverr", e.config.FlareSolverrURL != "")
+
+	body, err := e.fetchHTML(url)
 	if err != nil {
-		return -1, -1, "", fmt.Errorf("failed to create request: %w", err)
+		// When FlareSolverr is configured, the colly fallback is intentionally
+		// skipped: we want a FlareSolverr failure to surface, not to be masked
+		// by a second attempt from a raw Go client that has already been
+		// blocked at this IP.
+		if e.config.FlareSolverrURL != "" {
+			return -1, -1, "", err
+		}
+		slog.Debug("Direct fetch failed, trying colly fallback", "error", err)
+		total, clientNumber, fallbackErr := e.getNumbersFromWithColly(url, clientName)
+		return total, clientNumber, "", fallbackErr
 	}
-	
-	// Set the exact same User-Agent as the working curl command
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	
-	// Make the request
-	resp, err := client.Do(req)
-	if err != nil {
-		slog.Debug("Direct HTTP request failed", "error", err)
-		// Fall back to colly if direct request fails
-		total, clientNumber, err := e.getNumbersFromWithColly(url, clientName)
-		return total, clientNumber, "", err
-	}
-	defer resp.Body.Close()
-	
-	slog.Debug("Direct HTTP request successful", "status", resp.StatusCode, "contentLength", resp.ContentLength)
-	
-	// Read the response body
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		slog.Debug("Failed to read response body", "error", err)
-		total, clientNumber, err := e.getNumbersFromWithColly(url, clientName)
-		return total, clientNumber, "", err
-	}
-	
+
 	bodyStr := string(body)
-	slog.Debug("Response body length", "length", len(bodyStr))
-	
-	// Check if we got a Cloudflare protection page
-	if strings.Contains(bodyStr, "Just a moment") || strings.Contains(bodyStr, "Cloudflare") {
-		slog.Debug("Detected Cloudflare protection page in direct request")
-		total, clientNumber, err := e.getNumbersFromWithColly(url, clientName)
-		return total, clientNumber, "", err
-	}
-	
-	// Parse the HTML using goquery
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(bodyStr))
 	if err != nil {
+		if e.config.FlareSolverrURL != "" {
+			return -1, -1, "", fmt.Errorf("parse HTML: %w", err)
+		}
 		slog.Debug("Failed to parse HTML from direct request", "error", err)
-		total, clientNumber, err := e.getNumbersFromWithColly(url, clientName)
-		return total, clientNumber, "", err
+		total, clientNumber, fallbackErr := e.getNumbersFromWithColly(url, clientName)
+		return total, clientNumber, "", fallbackErr
 	}
-	
-	// Process the HTML
+
 	processHTML(doc, clientName, &total, &clientNumber, &scrapeErr)
-	
+
 	if total > 0 && clientNumber > 0 {
-		slog.Debug("Successfully extracted data from direct HTTP request", "total", total, "clientNumber", clientNumber)
+		slog.Debug("Successfully extracted data", "total", total, "clientNumber", clientNumber)
 		return total, clientNumber, bodyStr, nil
 	}
-	
-	slog.Debug("Direct HTTP request didn't yield data, trying colly fallback")
-	total, clientNumber, err = e.getNumbersFromWithColly(url, clientName)
-	return total, clientNumber, "", err
+
+	if e.config.FlareSolverrURL != "" {
+		return -1, -1, "", fmt.Errorf("could not extract total/client counts from %s", url)
+	}
+	slog.Debug("Direct fetch did not yield data, trying colly fallback")
+	total, clientNumber, fallbackErr := e.getNumbersFromWithColly(url, clientName)
+	return total, clientNumber, "", fallbackErr
 }
 
 func (e EthernodesDataSource) getNumbersFromWithColly(url string, clientName configs.ClientType) (int64, int64, error) {
@@ -660,45 +708,11 @@ func (e EthernodesDataSource) getOverallExecutionLayerSynced() (int64, error) {
 	return count, nil
 }
 
-// fetchWithEnhancedHeaders performs the same browser-like GET that
-// getClientCountWithEnhancedHeaders does, but returns the decompressed body so
-// other scrapers can reuse the bypass.
+// fetchWithEnhancedHeaders delegates to fetchHTML so callers (the per-client
+// synced page and the /sync overall page) share the same FlareSolverr-aware
+// fetch path as the main-page scraper.
 func (e EthernodesDataSource) fetchWithEnhancedHeaders(url string) ([]byte, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Accept-Encoding", "gzip, deflate")
-	req.Header.Set("Cache-Control", "no-cache")
-	req.Header.Set("Pragma", "no-cache")
-	req.Header.Set("Sec-Ch-Ua", "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
-	req.Header.Set("Sec-Ch-Ua-Mobile", "?0")
-	req.Header.Set("Sec-Ch-Ua-Platform", "\"macOS\"")
-	req.Header.Set("Sec-Fetch-Dest", "document")
-	req.Header.Set("Sec-Fetch-Mode", "navigate")
-	req.Header.Set("Sec-Fetch-Site", "none")
-	req.Header.Set("Sec-Fetch-User", "?1")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
-	req.Header.Set("Referer", "https://ethernodes.org/")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	body, err := readMaybeGzip(resp)
-	if err != nil {
-		return nil, err
-	}
-	if strings.Contains(string(body), "Just a moment") || strings.Contains(string(body), "cf-browser-verification") {
-		return nil, fmt.Errorf("cloudflare protection detected at %s", url)
-	}
-	return body, nil
+	return e.fetchHTML(url)
 }
 
 
