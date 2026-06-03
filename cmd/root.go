@@ -40,6 +40,10 @@ type RootCmdFlags struct {
 	// Slack Channel
 	SlackChannel string
 
+	// FlareSolverr v1 endpoint. When non-empty, ethernodes fetches are proxied
+	// through it (real headless Chromium) instead of going direct.
+	FlareSolverrURL string
+
 	// Add new flags for MaxRetries and InitialRetryDelay
 	MaxRetries        int
 	InitialRetryDelay time.Duration
@@ -80,6 +84,10 @@ func (f *RootCmdFlags) Validate() error {
 		if f.SlackChannel == "" {
 			return fmt.Errorf("slack channel is required")
 		}
+	}
+
+	if f.FlareSolverrURL == "" {
+		f.FlareSolverrURL = viper.GetString("flaresolverr_url")
 	}
 
 	return nil
@@ -141,7 +149,9 @@ func NewRootCmd() (*cobra.Command, error) {
 				}
 				ctx = context.WithValue(ctx, configs.ContextKeySource, source)
 			case datasources.DataSourceTypeEthernodes:
-				source, err := datasources.NewEthernodesDataSource(nil)
+				source, err := datasources.NewEthernodesDataSource(&datasources.EthernodesDataSourceOptions{
+					FlareSolverrURL: flags.FlareSolverrURL,
+				})
 				if err != nil {
 					return fmt.Errorf("failed to create ethernodes data source: %w", err)
 				}
@@ -265,6 +275,11 @@ func NewRootCmd() (*cobra.Command, error) {
 	// Slack Channel
 	viper.BindEnv("slack_channel")
 	rootCmd.PersistentFlags().StringVar(&flags.SlackChannel, "slack-channel", "", "slack channel name or id. environment variable: REPORTER_SLACK_CHANNEL")
+
+	// FlareSolverr (optional). When set, all ethernodes.org fetches are routed
+	// through this v1 endpoint instead of going direct.
+	viper.BindEnv("flaresolverr_url")
+	rootCmd.PersistentFlags().StringVar(&flags.FlareSolverrURL, "flaresolverr-url", "", "FlareSolverr v1 endpoint (e.g. http://localhost:8191/v1). If set, ethernodes fetches go through it. environment variable: REPORTER_FLARESOLVERR_URL")
 
 	// Add these new flag bindings at the end of the flag configuration section
 	rootCmd.PersistentFlags().IntVar(&flags.MaxRetries, "max-retries", 3, "maximum number of retries for operations")

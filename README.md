@@ -6,7 +6,7 @@ A small Go CLI that:
 2. Records one row per run in a Notion database,
 3. Posts a Slack message summarising today's count and a 35-day trend chart (rendered via QuickChart).
 
-It is designed to be run as a one-shot job — locally, in a container, or as a GitHub Actions scheduled workflow.
+It is designed to be run as a one-shot job — locally, in a container, or via any scheduler (GitHub Actions, Kubernetes CronJob, systemd timer, plain cron, etc.).
 
 ## Architecture
 
@@ -25,12 +25,13 @@ All settings can be provided as a flag or as an environment variable.
 | `--source`, `-s` | — | `ethernodes` | `ethernodes` or `ethernets` (the latter is currently broken; kept for reference) |
 | `--client`, `-c` | — | `nethermind` | `nethermind`, `geth`, `besu`, `erigon`, `reth` |
 | `--debug`, `-d` | — | `false` | sets log level to debug |
-| `--log-format`, `-f` | `REPORTER_LOG_FORMAT` | `json` | `json` (recommended for K8s log shippers) or `text` |
+| `--log-format`, `-f` | `REPORTER_LOG_FORMAT` | `json` | `json` or `text` |
 | `--skip-update` | — | `false` | skip scraping and Notion write; only read history and post to Slack |
 | `--notion-db` | `REPORTER_NOTION_DB` | — | **required** — Notion database ID |
 | `--notion-token` | `REPORTER_NOTION_TOKEN` | — | **required** — Notion integration token |
 | `--slack-app-token` | `REPORTER_SLACK_APP_TOKEN` | — | **required** — Slack bot token |
 | `--slack-channel` | `REPORTER_SLACK_CHANNEL` | — | **required** — channel name or ID |
+| `--flaresolverr-url` | `REPORTER_FLARESOLVERR_URL` | — | optional — FlareSolverr v1 endpoint (e.g. `http://localhost:8191/v1`). When set, all ethernodes fetches are proxied through it. See [Cloudflare workaround](#cloudflare-workaround-flaresolverr). |
 | `--max-retries` | — | `3` | retry knob (currently unused by scrapers) |
 | `--retry-delay` | — | `1s` | retry knob (currently unused by scrapers) |
 
@@ -53,7 +54,7 @@ docker run --rm --env-file .env client-nodes-reporter:local \
   --debug --client nethermind --source ethernodes
 ```
 
-Or, once published (see Releasing below):
+Or, with the published image:
 
 ```sh
 docker run --rm --env-file .env \
@@ -61,13 +62,35 @@ docker run --rm --env-file .env \
   --client nethermind --source ethernodes
 ```
 
-## Running on a schedule (GitHub Actions)
+## Cloudflare workaround (FlareSolverr)
 
-The repo ships a workflow at `.github/workflows/ethernodes-scrape.yml` that runs the published image once per client per day (10:00 UTC, matrix over `nethermind`, `geth`, `besu`, `erigon`, `reth`) and can be triggered manually with a `skip-update` toggle.
+`ethernodes.org` sits behind Cloudflare, which can return `HTTP 403` to direct requests from datacenter IPs or any client whose TLS fingerprint and header order don't look like a real browser. The scraper detects this and fails loudly rather than parsing garbage.
 
-This runs on GitHub-hosted runners on purpose: `ethernodes.org` sits behind Cloudflare, and Cloudflare currently blocks requests from common datacenter egress IPs (the AWS/OVH ranges used by self-hosted Kubernetes clusters in particular). The GitHub Actions runner IP ranges are the only egress we've found that reliably gets through without a paid residential proxy. Until that changes, running the binary on a schedule from anywhere other than GH Actions is not recommended.
+To work around it, the tool can route fetches through a [**FlareSolverr**](https://github.com/FlareSolverr/FlareSolverr) instance — an HTTP proxy that drives a real headless Chromium, which fixes both the TLS fingerprint and any JS challenges Cloudflare wants solved. Set `--flaresolverr-url` (or `REPORTER_FLARESOLVERR_URL`) to its `/v1` endpoint and all ethernodes fetches go through it; leave it empty and the tool does a direct fetch with browser-shaped headers (plus a `colly` fallback).
 
-The workflow expects these secrets to be set on the repo: `REPORTER_NOTION_DB`, `REPORTER_NOTION_TOKEN`, `REPORTER_SLACK_APP_TOKEN`. The Slack channel is hardcoded in the workflow.
+Caveat: FlareSolverr beats challenge-layer blocks (JS check, fingerprint, header order). It does **not** beat pure IP-reputation blocks — the FlareSolverr-issued request still leaves from the same egress IP as the host running it. If Cloudflare keeps serving 403 even with FlareSolverr in front, the IP is the problem and the host needs to be on an egress Cloudflare considers benign.
+
+### Running locally with FlareSolverr
+
+```sh
+docker run -d --rm --name flaresolverr -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest
+# wait ~20s for Chromium to boot
+export $(grep -v '^#' .env | xargs)
+REPORTER_FLARESOLVERR_URL=http://localhost:8191/v1 \
+  go run main.go --debug --client nethermind --source ethernodes
+docker stop flaresolverr
+```
+
+## Running on a schedule
+
+The binary is a one-shot, so any scheduler that can run a container or a binary once a day works. The repo includes one example: `.github/workflows/ethernodes-scrape.yml`, a GitHub Actions workflow that brings up a FlareSolverr service container next to the scraper and triggers the published image on a daily cron (also triggerable manually with a `skip-update` toggle).
+
+For other schedulers (Kubernetes CronJob, systemd timer, plain cron) the recipe is the same:
+
+1. Make sure a FlareSolverr instance is reachable from wherever the binary runs (sidecar container, peer pod, separate host).
+2. Provide the four `REPORTER_*` secrets via env or `.env`.
+3. Set `REPORTER_FLARESOLVERR_URL` to the FlareSolverr `/v1` endpoint.
+4. Invoke the binary or the published image once per day.
 
 ## Data sources
 
@@ -76,7 +99,7 @@ The workflow expects these secrets to be set on the repo: `REPORTER_NOTION_DB`, 
 - Total + per-client counts come from the main page at `https://ethernodes.org`.
 - Per-client synced count comes from `https://ethernodes.org/client/el/<client>?synced=1`.
 - Overall execution-layer synced count comes from `https://ethernodes.org/sync`.
-- The site sits behind Cloudflare; the scraper uses browser-shaped headers and decompresses gzipped responses manually. If Cloudflare ever blocks the scraper, the run fails loudly (no silent fallbacks).
+- The site sits behind Cloudflare; see [Cloudflare workaround](#cloudflare-workaround-flaresolverr) above for how to route through FlareSolverr. If a fetch returns a Cloudflare challenge or block page, the run fails loudly (no silent fallbacks).
 
 ### ethernets
 
@@ -92,7 +115,7 @@ Currently broken. The data source is kept in the codebase but is no longer the d
 
 Pushing to `main` or pushing a tag publishes to GHCR via `.github/workflows/docker-publish.yml`:
 
-- Push to `main` → `ghcr.io/nethermindeth/client-nodes-reporter:latest` + `:main` + `:sha-<short>`
+- Push to `main` → `:latest` + `:main` + `:sha-<short>`
 - Push a tag `vX.Y.Z` → `:X.Y.Z` + `:X.Y` (plus `latest`/`main`/`sha-` if on default branch)
 
 For the workflow to push to GHCR, the repo must have **Settings → Actions → General → Workflow permissions → Read and write permissions** enabled.
@@ -101,6 +124,6 @@ For the workflow to push to GHCR, the repo must have **Settings → Actions → 
 
 - `--max-retries` and `--retry-delay` flags exist but are not wired through into the scrapers.
 - The `ethernets` data source is broken and not currently being repaired.
-- No automated tests. Selector drift on ethernodes.org will only surface as a failed workflow run; if the Slack message stops appearing, run the binary locally with `--debug` to see which step failed.
-- Scraping from datacenter egress IPs (e.g. self-hosted Kubernetes on AWS/OVH) is currently blocked by Cloudflare. The GitHub Actions runner IPs are the only egress that reliably gets through; reviving a K8s deployment would require routing through a residential proxy or a Cloudflare-bypass service such as FlareSolverr.
+- No automated tests. Selector drift on ethernodes.org will only surface as a failed run; if the Slack message stops appearing, run the binary locally with `--debug` to see which step failed.
+- Cloudflare can 403 direct requests from datacenter IPs. Route through FlareSolverr, or run from an egress Cloudflare considers benign. If FlareSolverr alone is not enough (IP-reputation block), the only remedy is to move the egress.
 - The ethernodes scraper only requests gzip+deflate (not brotli) to avoid pulling in a brotli decoder. Cloudflare currently honours this; if it ever stops, add `github.com/andybalholm/brotli` and teach `readMaybeGzip` about `Content-Encoding: br`.

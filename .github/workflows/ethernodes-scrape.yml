@@ -18,6 +18,17 @@ jobs:
   scrape:
     name: Scrape ${{ matrix.client }}
     runs-on: ubuntu-latest
+    # FlareSolverr drives a real headless Chromium so Cloudflare-fronted requests
+    # to ethernodes.org get a legitimate TLS fingerprint and any JS challenges
+    # are solved. Bound to the runner host on 8191 so the scraper container can
+    # reach it via --network=host below.
+    services:
+      flaresolverr:
+        image: ghcr.io/flaresolverr/flaresolverr:latest
+        ports:
+          - 8191:8191
+        env:
+          LOG_LEVEL: info
     strategy:
       fail-fast: false
       max-parallel: 1
@@ -31,19 +42,34 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Wait for FlareSolverr to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8191/ >/dev/null; then
+              echo "FlareSolverr is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "FlareSolverr did not become ready in 60s" >&2
+          exit 1
+
       - name: Run client-nodes-reporter (${{ matrix.client }})
         env:
           REPORTER_NOTION_DB: ${{ secrets.REPORTER_NOTION_DB }}
           REPORTER_NOTION_TOKEN: ${{ secrets.REPORTER_NOTION_TOKEN }}
           REPORTER_SLACK_APP_TOKEN: ${{ secrets.REPORTER_SLACK_APP_TOKEN }}
           REPORTER_SLACK_CHANNEL: core-budget-alerts
+          REPORTER_FLARESOLVERR_URL: http://localhost:8191/v1
           SKIP_UPDATE_FLAG: ${{ inputs.skip-update == true && '--skip-update' || '' }}
         run: |
           docker run --rm \
+            --network=host \
             -e REPORTER_NOTION_DB \
             -e REPORTER_NOTION_TOKEN \
             -e REPORTER_SLACK_APP_TOKEN \
             -e REPORTER_SLACK_CHANNEL \
+            -e REPORTER_FLARESOLVERR_URL \
             ghcr.io/nethermindeth/client-nodes-reporter:latest \
             --debug \
             --source ethernodes \
