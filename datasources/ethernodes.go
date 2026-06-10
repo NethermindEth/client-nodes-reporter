@@ -299,7 +299,7 @@ func (e EthernodesDataSource) getNumbersFromWithColly(url string, clientName con
 		}
 		
 		retries := r.Ctx.GetAny("retries").(int)
-		if retries < 1 { // Reduce max retries to 1 to prevent infinite loops
+		if retries < e.config.MaxRetries {
 			slog.Debug("Error during http request. Retrying...", "error", err, "retries", retries)
 			delay := time.Duration(int64(e.config.InitialRetryDelay) * (1 << uint(retries)))
 			time.Sleep(delay)

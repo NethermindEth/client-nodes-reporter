@@ -143,14 +143,19 @@ func NewRootCmd() (*cobra.Command, error) {
 			// Configure source
 			switch datasources.DataSourceType(flags.Source) {
 			case datasources.DataSourceTypeEthernets:
-				source, err := datasources.NewEthernetsDataSource(nil)
+				source, err := datasources.NewEthernetsDataSource(&datasources.EthernetsDataSourceOptions{
+					MaxRetries:        flags.MaxRetries,
+					InitialRetryDelay: flags.InitialRetryDelay,
+				})
 				if err != nil {
 					return fmt.Errorf("failed to create ethernets data source: %w", err)
 				}
 				ctx = context.WithValue(ctx, configs.ContextKeySource, source)
 			case datasources.DataSourceTypeEthernodes:
 				source, err := datasources.NewEthernodesDataSource(&datasources.EthernodesDataSourceOptions{
-					FlareSolverrURL: flags.FlareSolverrURL,
+					FlareSolverrURL:   flags.FlareSolverrURL,
+					MaxRetries:        flags.MaxRetries,
+					InitialRetryDelay: flags.InitialRetryDelay,
 				})
 				if err != nil {
 					return fmt.Errorf("failed to create ethernodes data source: %w", err)
