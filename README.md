@@ -22,7 +22,7 @@ All settings can be provided as a flag or as an environment variable.
 
 | Flag | Env var | Default | Notes |
 |---|---|---|---|
-| `--source`, `-s` | — | `ethernodes` | `ethernodes` or `ethernets` (the latter is currently broken; kept for reference) |
+| `--source`, `-s` | — | `ethernodes` | `ethernodes` or `ethernets` |
 | `--client`, `-c` | — | `nethermind` | `nethermind`, `geth`, `besu`, `erigon`, `reth` |
 | `--debug`, `-d` | — | `false` | sets log level to debug |
 | `--log-format`, `-f` | `REPORTER_LOG_FORMAT` | `json` | `json` or `text` |
@@ -32,8 +32,8 @@ All settings can be provided as a flag or as an environment variable.
 | `--slack-app-token` | `REPORTER_SLACK_APP_TOKEN` | — | **required** — Slack bot token |
 | `--slack-channel` | `REPORTER_SLACK_CHANNEL` | — | **required** — channel name or ID |
 | `--flaresolverr-url` | `REPORTER_FLARESOLVERR_URL` | — | optional — FlareSolverr v1 endpoint (e.g. `http://localhost:8191/v1`). When set, all ethernodes fetches are proxied through it. See [Cloudflare workaround](#cloudflare-workaround-flaresolverr). |
-| `--max-retries` | — | `3` | retry knob (currently unused by scrapers) |
-| `--retry-delay` | — | `1s` | retry knob (currently unused by scrapers) |
+| `--max-retries` | — | `3` | maximum retry attempts per fetch |
+| `--retry-delay` | — | `1s` | initial backoff between retries (doubled on each attempt) |
 
 ## Running locally — from source
 
@@ -103,7 +103,10 @@ For other schedulers (Kubernetes CronJob, systemd timer, plain cron) the recipe 
 
 ### ethernets
 
-Currently broken. The data source is kept in the codebase but is no longer the default. Pass `--source ethernets` to attempt it.
+- Synced totals (network + per-client) come from `https://www.ethernets.io/?synced=yes`.
+- Unsynced totals come from `https://www.ethernets.io/?synced=no`.
+- The two are summed to produce the overall network total and per-client total; the synced page directly yields the synced counts.
+- No Cloudflare in front of the site, so FlareSolverr is not needed.
 
 ## Adding a new client
 
@@ -122,8 +125,6 @@ For the workflow to push to GHCR, the repo must have **Settings → Actions → 
 
 ## Known limitations / future work
 
-- `--max-retries` and `--retry-delay` flags exist but are not wired through into the scrapers.
-- The `ethernets` data source is broken and not currently being repaired.
-- No automated tests. Selector drift on ethernodes.org will only surface as a failed run; if the Slack message stops appearing, run the binary locally with `--debug` to see which step failed.
-- Cloudflare can 403 direct requests from datacenter IPs. Route through FlareSolverr, or run from an egress Cloudflare considers benign. If FlareSolverr alone is not enough (IP-reputation block), the only remedy is to move the egress.
+- No automated tests. Selector drift on either source will only surface as a failed run; if the Slack message stops appearing, run the binary locally with `--debug` to see which step failed.
+- Cloudflare can 403 direct requests from datacenter IPs against ethernodes.org. Route through FlareSolverr, or run from an egress Cloudflare considers benign. If FlareSolverr alone is not enough (IP-reputation block), the only remedy is to move the egress.
 - The ethernodes scraper only requests gzip+deflate (not brotli) to avoid pulling in a brotli decoder. Cloudflare currently honours this; if it ever stops, add `github.com/andybalholm/brotli` and teach `readMaybeGzip` about `Content-Encoding: br`.
