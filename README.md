@@ -108,6 +108,46 @@ For other schedulers (Kubernetes CronJob, systemd timer, plain cron) the recipe 
 - The two are summed to produce the overall network total and per-client total; the synced page directly yields the synced counts.
 - No Cloudflare in front of the site, so FlareSolverr is not needed.
 
+## Nethermind state-scheme report
+
+`reporter nethermind-state-scheme` is a separate, Nethermind-specific subcommand that tracks how the Nethermind execution-layer fleet is moving from pre-v2 releases to v2, and on v2, how many nodes run the halfpath vs the flat state scheme. It reads node data from the public [enrscout](https://enrscout.ethnodeops.xyz) API, stores one row per run in its own Notion database, and posts a Slack summary with two charts: node counts stacked by bucket, and the flat share of v2 nodes over time.
+
+Nodes are grouped by `client_version`:
+
+| Bucket | Rule | Example |
+|---|---|---|
+| Pre V2 | major version < 2 (or unparseable) | `v1.39.3+28cbe2a0` |
+| V2 Halfpath | v2+, ends in `-hp` | `v2.0.0+bec830cd-hp` |
+| V2 Flat | v2+, ends in `-f` | `v2.0.0+bec830cd-f` |
+| V2 Other | v2+, any other suffix | `v2.0.0+bec830cd-fit` |
+
+Every node enrscout lists is counted. Nodes whose fingerprint is not fresh (`fp_status != ok`) are also counted separately as `Stale`. enrscout's methodology version is stored with each row, and the Slack message warns when it changes between runs.
+
+```sh
+REPORTER_STATE_SCHEME_NOTION_DB=<database id> \
+  go run main.go nethermind-state-scheme --debug --log-format text
+```
+
+The subcommand shares `--notion-token`, `--slack-app-token`, `--slack-channel`, `--max-retries`, `--retry-delay`, `--skip-update`, `--debug` and `--log-format` with the root command, and adds:
+
+| Flag | Env var | Default | Notes |
+|---|---|---|---|
+| `--notion-db` | `REPORTER_STATE_SCHEME_NOTION_DB` | — | **required** — must be a different database from `REPORTER_NOTION_DB` |
+| `--network` | — | `mainnet` | `mainnet`, `hoodi` or `sepolia` |
+
+The Notion database needs these properties (names and types must match), and it must be shared with the integration:
+
+| Property | Type |
+|---|---|
+| `Name` | Title |
+| `Network` | Select |
+| `Total`, `Pre V2`, `V2 Halfpath`, `V2 Flat`, `V2 Other`, `Stale`, `Network EL Total` | Number |
+| `Methodology` | Text |
+| `Snapshot At` | Date |
+| `Created time` | Created time |
+
+Charts are uploaded via QuickChart's `/chart/create` endpoint, because the inline URL for this many series is longer than Slack's image URL limit.
+
 ## Adding a new client
 
 1. Add a new `ClientType` constant in `configs/configs.go`.
@@ -125,6 +165,6 @@ For the workflow to push to GHCR, the repo must have **Settings → Actions → 
 
 ## Known limitations / future work
 
-- No automated tests. Selector drift on either source will only surface as a failed run; if the Slack message stops appearing, run the binary locally with `--debug` to see which step failed.
+- No automated tests for the scrapers. Selector drift on either source will only surface as a failed run; if the Slack message stops appearing, run the binary locally with `--debug` to see which step failed.
 - Cloudflare can 403 direct requests from datacenter IPs against ethernodes.org. Route through FlareSolverr, or run from an egress Cloudflare considers benign. If FlareSolverr alone is not enough (IP-reputation block), the only remedy is to move the egress.
 - The ethernodes scraper only requests gzip+deflate (not brotli) to avoid pulling in a brotli decoder. Cloudflare currently honours this; if it ever stops, add `github.com/andybalholm/brotli` and teach `readMaybeGzip` about `Content-Encoding: br`.
