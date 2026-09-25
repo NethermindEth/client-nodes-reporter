@@ -48,6 +48,29 @@ func GetSelectValue(property notionapi.Property) (string, bool) {
 	return prop.Select.Name, true
 }
 
+func GetRichTextValue(property notionapi.Property) (string, bool) {
+	prop, ok := property.(*notionapi.RichTextProperty)
+	if !ok {
+		return "", false
+	}
+
+	var text string
+	for _, rt := range prop.RichText {
+		text += rt.PlainText
+	}
+
+	return text, true
+}
+
+func GetDateValue(property notionapi.Property) (time.Time, bool) {
+	prop, ok := property.(*notionapi.DateProperty)
+	if !ok || prop.Date == nil || prop.Date.Start == nil {
+		return time.Time{}, false
+	}
+
+	return time.Time(*prop.Date.Start), true
+}
+
 // Building Methods
 
 func BuildTitleProperty(title string) notionapi.Property {
@@ -87,5 +110,14 @@ func BuildSelectProperty(option string) notionapi.Property {
 func BuildNumberProperty(number float64) notionapi.Property {
 	return notionapi.NumberProperty{
 		Number: number,
+	}
+}
+
+func BuildDateProperty(t time.Time) notionapi.Property {
+	start := notionapi.Date(t)
+	return notionapi.DateProperty{
+		Date: &notionapi.DateObject{
+			Start: &start,
+		},
 	}
 }

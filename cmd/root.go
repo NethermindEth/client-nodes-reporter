@@ -65,6 +65,18 @@ func (f *RootCmdFlags) Validate() error {
 		}
 	}
 
+	if err := f.validateCommon(); err != nil {
+		return err
+	}
+
+	if f.FlareSolverrURL == "" {
+		f.FlareSolverrURL = viper.GetString("flaresolverr_url")
+	}
+
+	return nil
+}
+
+func (f *RootCmdFlags) validateCommon() error {
 	if f.NotionToken == "" {
 		f.NotionToken = viper.GetString("notion_token")
 		if f.NotionToken == "" {
@@ -86,10 +98,6 @@ func (f *RootCmdFlags) Validate() error {
 		}
 	}
 
-	if f.FlareSolverrURL == "" {
-		f.FlareSolverrURL = viper.GetString("flaresolverr_url")
-	}
-
 	return nil
 }
 
@@ -98,14 +106,14 @@ func NewRootCmd() (*cobra.Command, error) {
 
 	rootCmd := &cobra.Command{
 		Use: "reporter",
-		PreRunE: func(cmd *cobra.Command, args []string) error {
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
 			// Configure debug mode
 			ctx = context.WithValue(ctx, configs.ContextKeyDebug, flags.Debug)
 
 			// Allow REPORTER_LOG_FORMAT to override when the flag was not set.
-			if !cmd.PersistentFlags().Changed("log-format") {
+			if !cmd.Flags().Changed("log-format") {
 				if v := viper.GetString("log_format"); v != "" {
 					flags.LogsFormat = v
 				}
@@ -134,6 +142,13 @@ func NewRootCmd() (*cobra.Command, error) {
 			slog.SetDefault(logger)
 			slog.Debug("Configuring logger")
 			ctx = context.WithValue(ctx, configs.ContextKeyLogger, logger)
+
+			cmd.SetContext(ctx)
+
+			return nil
+		},
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
 
 			// Validate flags
 			if err := flags.Validate(); err != nil {
@@ -260,16 +275,16 @@ func NewRootCmd() (*cobra.Command, error) {
 	rootCmd.PersistentFlags().StringVarP(&flags.LogsFormat, "log-format", "f", "json", "logs format (json, text). environment variable: REPORTER_LOG_FORMAT")
 
 	// Source
-	rootCmd.PersistentFlags().StringVarP(&flags.Source, "source", "s", string(datasources.DataSourceTypeEthernodes), "source of the client nodes (ethernodes, ethernets)")
+	rootCmd.Flags().StringVarP(&flags.Source, "source", "s", string(datasources.DataSourceTypeEthernodes), "source of the client nodes (ethernodes, ethernets)")
 	// Client
-	rootCmd.PersistentFlags().StringVarP(&flags.Client, "client", "c", string(configs.ClientTypeNethermind), "client name")
+	rootCmd.Flags().StringVarP(&flags.Client, "client", "c", string(configs.ClientTypeNethermind), "client name")
 
 	// Skip Update
 	rootCmd.PersistentFlags().BoolVar(&flags.SkipUpdate, "skip-update", false, "skip updating data")
 
 	// Notion DB
 	viper.BindEnv("notion_db")
-	rootCmd.PersistentFlags().StringVar(&flags.NotionDB, "notion-db", "", "notion db. environment variable: REPORTER_NOTION_DB")
+	rootCmd.Flags().StringVar(&flags.NotionDB, "notion-db", "", "notion db. environment variable: REPORTER_NOTION_DB")
 	// Notion Token
 	viper.BindEnv("notion_token")
 	rootCmd.PersistentFlags().StringVar(&flags.NotionToken, "notion-token", "", "notion token. environment variable: REPORTER_NOTION_TOKEN")
@@ -284,11 +299,13 @@ func NewRootCmd() (*cobra.Command, error) {
 	// FlareSolverr (optional). When set, all ethernodes.org fetches are routed
 	// through this v1 endpoint instead of going direct.
 	viper.BindEnv("flaresolverr_url")
-	rootCmd.PersistentFlags().StringVar(&flags.FlareSolverrURL, "flaresolverr-url", "", "FlareSolverr v1 endpoint (e.g. http://localhost:8191/v1). If set, ethernodes fetches go through it. environment variable: REPORTER_FLARESOLVERR_URL")
+	rootCmd.Flags().StringVar(&flags.FlareSolverrURL, "flaresolverr-url", "", "FlareSolverr v1 endpoint (e.g. http://localhost:8191/v1). If set, ethernodes fetches go through it. environment variable: REPORTER_FLARESOLVERR_URL")
 
 	// Add these new flag bindings at the end of the flag configuration section
 	rootCmd.PersistentFlags().IntVar(&flags.MaxRetries, "max-retries", 3, "maximum number of retries for operations")
 	rootCmd.PersistentFlags().DurationVar(&flags.InitialRetryDelay, "retry-delay", time.Second, "initial delay between retry attempts")
+
+	rootCmd.AddCommand(newStateSchemeCmd(flags))
 
 	return rootCmd, nil
 }
