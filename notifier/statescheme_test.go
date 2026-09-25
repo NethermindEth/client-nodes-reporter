@@ -1,10 +1,14 @@
 package notifier
 
 import (
+	"encoding/json"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/slack-go/slack"
 
 	"client-nodes-reporter/datasources"
 )
@@ -46,45 +50,67 @@ func fakeSchemeHistory(days int) []datasources.StateSchemeSnapshot {
 	return out
 }
 
-func TestStateSchemeMsgMatchesLegacyStyle(t *testing.T) {
-	n := &SlackNotifier{}
-	history := fakeSchemeHistory(60)
-	last, prev := history[len(history)-1], history[len(history)-2]
-	msg := n.buildStateSchemeMsg(history)
-
-	for _, want := range []string{
-		"Today there are *2920* | *20.28%* Nethermind nodes on mainnet from which *500* | *17.12%* are still pre-v2 and *2420* | *82.88%* are on v2!",
-		"On v2, *902* | *37.27%* are running halfpath and *1510* | *62.40%* are running flat (*8* other)!",
-		"The number of all nodes is " + n.buildChangeMsg(last.Total-prev.Total),
-		"pre-v2 nodes are " + n.buildChangeMsg(last.PreV2-prev.PreV2),
-		"halfpath nodes are " + n.buildChangeMsg(last.V2Halfpath-prev.V2Halfpath),
-		"flat nodes are " + n.buildChangeMsg(last.V2Flat-prev.V2Flat),
-	} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("message missing %q\n%s", want, msg)
+func tableText(table *slack.TableBlock) [][]string {
+	out := make([][]string, len(table.Rows))
+	for i, row := range table.Rows {
+		for _, cell := range row {
+			text := cell.Elements[0].(*slack.RichTextSection).Elements[0].(*slack.RichTextSectionTextElement).Text
+			out[i] = append(out[i], text)
 		}
 	}
-	if strings.Contains(msg, "methodology changed") {
-		t.Error("unexpected methodology warning when methodology is unchanged")
-	}
+	return out
 }
 
-func TestStateSchemeMsgSingleReading(t *testing.T) {
+func TestStateSchemeMsgHeader(t *testing.T) {
 	n := &SlackNotifier{}
-	msg := n.buildStateSchemeMsg(fakeSchemeHistory(60)[:1])
-	if strings.Contains(msg, "The number of all nodes") {
-		t.Errorf("single reading should not include changes:\n%s", msg)
-	}
-	if got := strings.Count(msg, "\n"); got != 1 {
-		t.Errorf("single reading has %d line breaks, want 1:\n%s", got, msg)
+	want := "*Nethermind on mainnet* · Sep 29 · *2920* nodes (20.28% of EL) · flat is *62.40%* of v2"
+	if got := n.buildStateSchemeMsg(fakeSchemeHistory(60)); got != want {
+		t.Errorf("header = %q, want %q", got, want)
 	}
 }
 
-func TestStateSchemeMsgMethodologyWarning(t *testing.T) {
+func TestStateSchemeTable(t *testing.T) {
+	want := [][]string{
+		{"Scheme", "Nodes", "Share", "Change"},
+		{"Pre-v2", "500", "17.12%", "-30"},
+		{"v2 halfpath", "902", "30.89%", "-48"},
+		{"v2 flat", "1510", "51.71%", "+51"},
+		{"v2 other", "8", "0.27%", "+1"},
+		{"Total", "2920", "100.00%", "-26"},
+	}
+	if got := tableText(buildStateSchemeTable(fakeSchemeHistory(60))); !reflect.DeepEqual(got, want) {
+		t.Errorf("table = %v, want %v", got, want)
+	}
+}
+
+func TestStateSchemeTableSingleReading(t *testing.T) {
+	table := buildStateSchemeTable(fakeSchemeHistory(60)[:1])
+	for _, row := range tableText(table) {
+		if len(row) != 3 {
+			t.Errorf("single reading row %v should not include a change column", row)
+		}
+	}
+	if len(table.ColumnSettings) != 3 {
+		t.Errorf("single reading has %d column settings, want 3", len(table.ColumnSettings))
+	}
+}
+
+func TestStateSchemeMethodologyWarning(t *testing.T) {
 	n := &SlackNotifier{}
 	history := fakeSchemeHistory(60)
+	render := func() string {
+		raw, err := json.Marshal(n.buildStateSchemeBlocks(history, "https://example.com/chart.png"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(raw)
+	}
+
+	if strings.Contains(render(), "methodology changed") {
+		t.Error("unexpected methodology warning when methodology is unchanged")
+	}
 	history[len(history)-2].Methodology = "2026-08-v2"
-	if msg := n.buildStateSchemeMsg(history); !strings.Contains(msg, "methodology changed (`2026-08-v2` → `2026-08-v3`)") {
+	if msg := render(); !strings.Contains(msg, "methodology changed (`2026-08-v2` → `2026-08-v3`)") {
 		t.Errorf("expected methodology warning:\n%s", msg)
 	}
 }
@@ -107,16 +133,5 @@ func TestStateSchemeCharts(t *testing.T) {
 	}
 	if got := len(datasets[0]["data"].([]int64)); got != 60 {
 		t.Errorf("counts chart has %d points, want 60", got)
-	}
-
-	flat := buildStateSchemeFlatShareChart(history)
-	share := flat["data"].(map[string]any)["datasets"].([]map[string]any)[0]["data"].([]float64)
-	if got := share[len(share)-1]; got != 62.4 {
-		t.Errorf("last flat share = %v, want 62.4", got)
-	}
-	for _, v := range share {
-		if v < 0 || v > 100 {
-			t.Errorf("flat share %v out of range", v)
-		}
 	}
 }
