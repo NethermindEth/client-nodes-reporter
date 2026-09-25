@@ -110,7 +110,7 @@ For other schedulers (Kubernetes CronJob, systemd timer, plain cron) the recipe 
 
 ## Nethermind state-scheme report
 
-`reporter nethermind-state-scheme` is a separate, Nethermind-specific subcommand that tracks how the Nethermind execution-layer fleet is moving from pre-v2 releases to v2, and on v2, how many nodes run the halfpath vs the flat state scheme. It reads node data from the public [enrscout](https://enrscout.ethnodeops.xyz) API, stores one row per run in its own Notion database, and posts a Slack summary with two charts: node counts stacked by bucket, and the flat share of v2 nodes over time.
+`reporter nethermind-state-scheme` is a separate, Nethermind-specific subcommand that tracks how the Nethermind execution-layer fleet is moving from pre-v2 releases to v2, and on v2, how many nodes run the halfpath vs the flat state scheme. It reads node data from the public [enrscout](https://enrscout.ethnodeops.xyz) API, stores one row per run in its own Notion database, and posts a Slack summary table with a stacked bar chart of node counts per bucket over time.
 
 Nodes are grouped by `client_version`:
 

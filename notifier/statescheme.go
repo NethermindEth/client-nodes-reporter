@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"slices"
 	"time"
@@ -18,7 +17,7 @@ import (
 const quickChartCreateURL = "https://quickchart.io/chart/create"
 
 // Categorical slots validated for CVD separation on a white surface, assigned in
-// fixed order so each bucket keeps its color across both charts.
+// fixed order so each bucket keeps its color across reports.
 const (
 	colorPreV2    = "#2a78d6"
 	colorHalfpath = "#eb6834"
@@ -42,80 +41,112 @@ func percent(part, whole int64) float64 {
 	return float64(part) * 100 / float64(whole)
 }
 
-// buildStateSchemeMsg mirrors the wording and layout of SendReport's message.
-func (n *SlackNotifier) buildStateSchemeMsg(snapshots []schemeSnapshot) string {
-	last := snapshots[len(snapshots)-1]
-	v2 := last.V2Total()
-
-	msg := fmt.Sprintf(
-		"Today there are *%d* | *%.2f%%* Nethermind nodes on %s from which *%d* | *%.2f%%* are still pre-v2 and *%d* | *%.2f%%* are on v2!",
-		last.Total,
-		percent(last.Total, last.NetworkELTotal),
-		last.Network,
-		last.PreV2,
-		percent(last.PreV2, last.Total),
-		v2,
-		percent(v2, last.Total),
-	)
-	msg += "\n"
-	msg += fmt.Sprintf(
-		"On v2, *%d* | *%.2f%%* are running halfpath and *%d* | *%.2f%%* are running flat (*%d* other)!",
-		last.V2Halfpath,
-		percent(last.V2Halfpath, v2),
-		last.V2Flat,
-		percent(last.V2Flat, v2),
-		last.V2Other,
-	)
-
-	if len(snapshots) > 1 {
-		prev := snapshots[len(snapshots)-2]
-
-		msg += "\n"
-		msg += fmt.Sprintf(
-			"The number of all nodes is %s, pre-v2 nodes are %s, halfpath nodes are %s and flat nodes are %s",
-			n.buildChangeMsg(last.Total-prev.Total),
-			n.buildChangeMsg(last.PreV2-prev.PreV2),
-			n.buildChangeMsg(last.V2Halfpath-prev.V2Halfpath),
-			n.buildChangeMsg(last.V2Flat-prev.V2Flat),
-		)
-
-		if prev.Methodology != last.Methodology {
-			msg += "\n"
-			msg += fmt.Sprintf(
-				":warning: enrscout methodology changed (`%s` → `%s`), counts may not be comparable with previous reports",
-				prev.Methodology,
-				last.Methodology,
-			)
-		}
+func signed(v int64) string {
+	if v > 0 {
+		return fmt.Sprintf("+%d", v)
 	}
-
-	return msg
+	return fmt.Sprintf("%d", v)
 }
 
-func (n *SlackNotifier) buildStateSchemeBlocks(snapshots []schemeSnapshot, countsChartURL, flatShareChartURL string) []slack.Block {
-	network := snapshots[len(snapshots)-1].Network
-	countsTitle := fmt.Sprintf("Nethermind %s nodes by state scheme", network)
-	flatShareTitle := fmt.Sprintf("Nethermind %s flat share of v2 nodes", network)
+func previousSnapshot(snapshots []schemeSnapshot) *schemeSnapshot {
+	if len(snapshots) < 2 {
+		return nil
+	}
+	return &snapshots[len(snapshots)-2]
+}
 
-	return []slack.Block{
+func (n *SlackNotifier) buildStateSchemeMsg(snapshots []schemeSnapshot) string {
+	last := snapshots[len(snapshots)-1]
+	return fmt.Sprintf(
+		"*Nethermind on %s* · %s · *%d* nodes (%.2f%% of EL) · flat is *%.2f%%* of v2",
+		last.Network,
+		last.ObservedAt().UTC().Format("Jan 2"),
+		last.Total,
+		percent(last.Total, last.NetworkELTotal),
+		percent(last.V2Flat, last.V2Total()),
+	)
+}
+
+func tableCell(text string, bold bool) *slack.RichTextBlock {
+	var style *slack.RichTextSectionTextStyle
+	if bold {
+		style = &slack.RichTextSectionTextStyle{Bold: true}
+	}
+	return slack.NewRichTextBlock("", slack.NewRichTextSection(slack.NewRichTextSectionTextElement(text, style)))
+}
+
+func buildStateSchemeTable(snapshots []schemeSnapshot) *slack.TableBlock {
+	last := snapshots[len(snapshots)-1]
+	prev := previousSnapshot(snapshots)
+
+	header := []string{"Scheme", "Nodes", "Share"}
+	settings := []slack.ColumnSetting{
+		{Align: slack.ColumnAlignmentLeft},
+		{Align: slack.ColumnAlignmentRight},
+		{Align: slack.ColumnAlignmentRight},
+	}
+	if prev != nil {
+		header = append(header, "Change")
+		settings = append(settings, slack.ColumnSetting{Align: slack.ColumnAlignmentRight})
+	}
+
+	table := slack.NewTableBlock("state-scheme-table").WithColumnSettings(settings...)
+	headerCells := make([]*slack.RichTextBlock, len(header))
+	for i, h := range header {
+		headerCells[i] = tableCell(h, true)
+	}
+	table.AddRow(headerCells...)
+
+	row := func(name string, bold bool, get func(schemeSnapshot) int64) {
+		cells := []*slack.RichTextBlock{
+			tableCell(name, bold),
+			tableCell(fmt.Sprintf("%d", get(last)), bold),
+			tableCell(fmt.Sprintf("%.2f%%", percent(get(last), last.Total)), bold),
+		}
+		if prev != nil {
+			cells = append(cells, tableCell(signed(get(last)-get(*prev)), bold))
+		}
+		table.AddRow(cells...)
+	}
+	row("Pre-v2", false, func(s schemeSnapshot) int64 { return s.PreV2 })
+	row("v2 halfpath", false, func(s schemeSnapshot) int64 { return s.V2Halfpath })
+	row("v2 flat", false, func(s schemeSnapshot) int64 { return s.V2Flat })
+	row("v2 other", false, func(s schemeSnapshot) int64 { return s.V2Other })
+	row("Total", true, func(s schemeSnapshot) int64 { return s.Total })
+
+	return table
+}
+
+func (n *SlackNotifier) buildStateSchemeBlocks(snapshots []schemeSnapshot, chartURL string) []slack.Block {
+	last := snapshots[len(snapshots)-1]
+	title := fmt.Sprintf("Nethermind %s nodes by state scheme", last.Network)
+
+	blocks := []slack.Block{
 		slack.NewSectionBlock(
 			slack.NewTextBlockObject(slack.MarkdownType, n.buildStateSchemeMsg(snapshots), false, false),
 			nil,
 			nil,
 		),
-		slack.NewImageBlock(
-			countsChartURL,
-			countsTitle,
-			"quickchart-image-counts",
-			slack.NewTextBlockObject(slack.PlainTextType, countsTitle, false, false),
-		),
-		slack.NewImageBlock(
-			flatShareChartURL,
-			flatShareTitle,
-			"quickchart-image-flat-share",
-			slack.NewTextBlockObject(slack.PlainTextType, flatShareTitle, false, false),
-		),
+		buildStateSchemeTable(snapshots),
 	}
+
+	if prev := previousSnapshot(snapshots); prev != nil && prev.Methodology != last.Methodology {
+		blocks = append(blocks, slack.NewContextBlock(
+			"",
+			slack.NewTextBlockObject(slack.MarkdownType, fmt.Sprintf(
+				":warning: enrscout methodology changed (`%s` → `%s`), counts may not be comparable with previous reports",
+				prev.Methodology,
+				last.Methodology,
+			), false, false),
+		))
+	}
+
+	return append(blocks, slack.NewImageBlock(
+		chartURL,
+		title,
+		"quickchart-image-counts",
+		slack.NewTextBlockObject(slack.PlainTextType, title, false, false),
+	))
 }
 
 func (n *SlackNotifier) SendStateSchemeReport(snapshots []schemeSnapshot) error {
@@ -124,35 +155,20 @@ func (n *SlackNotifier) SendStateSchemeReport(snapshots []schemeSnapshot) error 
 	}
 	slices.SortFunc(snapshots, schemeSnapshot.Compare)
 
-	countsChartURL, flatShareChartURL, err := BuildStateSchemeCharts(snapshots)
+	chartURL, err := createQuickChart(buildStateSchemeCountsChart(snapshots), 900, 420)
 	if err != nil {
-		return fmt.Errorf("failed to build state scheme charts: %w", err)
+		return fmt.Errorf("failed to build state scheme chart: %w", err)
 	}
 
 	_, _, err = n.api.PostMessage(
 		n.channel,
-		slack.MsgOptionBlocks(n.buildStateSchemeBlocks(snapshots, countsChartURL, flatShareChartURL)...),
+		slack.MsgOptionBlocks(n.buildStateSchemeBlocks(snapshots, chartURL)...),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to send message: %w", err)
 	}
 
 	return nil
-}
-
-// BuildStateSchemeCharts returns QuickChart short URLs for the stacked node counts
-// and the flat-share trend. Two charts instead of one dual-axis chart, because the
-// counts and the percentage do not share a scale.
-func BuildStateSchemeCharts(snapshots []schemeSnapshot) (string, string, error) {
-	countsURL, err := createQuickChart(buildStateSchemeCountsChart(snapshots), 900, 420)
-	if err != nil {
-		return "", "", fmt.Errorf("counts chart: %w", err)
-	}
-	flatShareURL, err := createQuickChart(buildStateSchemeFlatShareChart(snapshots), 900, 280)
-	if err != nil {
-		return "", "", fmt.Errorf("flat share chart: %w", err)
-	}
-	return countsURL, flatShareURL, nil
 }
 
 func stateSchemeLabels(snapshots []schemeSnapshot) []string {
@@ -223,41 +239,6 @@ func buildStateSchemeCountsChart(snapshots []schemeSnapshot) map[string]any {
 			"scales": map[string]any{
 				"xAxes": []map[string]any{chartXAxis(true)},
 				"yAxes": []map[string]any{chartYAxis("Nodes", true, map[string]any{"beginAtZero": true, "maxTicksLimit": 6})},
-			},
-		},
-	}
-}
-
-func buildStateSchemeFlatShareChart(snapshots []schemeSnapshot) map[string]any {
-	share := make([]float64, len(snapshots))
-	for i, s := range snapshots {
-		share[i] = math.Round(percent(s.V2Flat, s.V2Total())*10) / 10
-	}
-
-	return map[string]any{
-		"type": "line",
-		"data": map[string]any{
-			"labels": stateSchemeLabels(snapshots),
-			"datasets": []map[string]any{{
-				"label":                "Flat % of v2",
-				"data":                 share,
-				"borderColor":          colorFlat,
-				"backgroundColor":      colorFlat,
-				"borderWidth":          2,
-				"pointRadius":          4,
-				"pointBorderColor":     colorSurface,
-				"pointBorderWidth":     2,
-				"pointBackgroundColor": colorFlat,
-				"fill":                 false,
-				"lineTension":          0,
-			}},
-		},
-		"options": map[string]any{
-			"title":  chartTitle(fmt.Sprintf("Flat share of v2 nodes: %.1f%%", share[len(share)-1])),
-			"legend": map[string]any{"display": false},
-			"scales": map[string]any{
-				"xAxes": []map[string]any{chartXAxis(false)},
-				"yAxes": []map[string]any{chartYAxis("% of v2 nodes", false, map[string]any{"min": 0, "max": 100, "stepSize": 25})},
 			},
 		},
 	}
