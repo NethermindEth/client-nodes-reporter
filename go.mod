@@ -1,12 +1,12 @@
 module client-nodes-reporter
 
-go 1.23.4
+go 1.25.0
 
 require (
 	github.com/PuerkitoBio/goquery v1.10.1
 	github.com/gocolly/colly v1.2.0
 	github.com/jomei/notionapi v1.13.3
-	github.com/slack-go/slack v0.15.0
+	github.com/slack-go/slack v0.23.1
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.19.0
 )
@@ -39,9 +39,9 @@ require (
 	go.uber.org/atomic v1.9.0 // indirect
 	go.uber.org/multierr v1.9.0 // indirect
 	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
-	golang.org/x/net v0.38.0 // indirect
-	golang.org/x/sys v0.31.0 // indirect
-	golang.org/x/text v0.23.0 // indirect
+	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/protobuf v1.36.3 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
