@@ -37,7 +37,7 @@ All settings can be provided as a flag or as an environment variable.
 
 ## Running locally — from source
 
-Requires Go 1.23+.
+Requires Go 1.25+.
 
 ```sh
 export $(grep -v '^#' .env | xargs)
