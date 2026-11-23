@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -58,6 +59,13 @@ type DB struct {
 // Open opens (creating if needed) the SQLite database at path and migrates it
 // to the latest schema.
 func Open(ctx context.Context, path string) (*DB, error) {
+	// The file can hold a live Slack token, so keep it private to its owner.
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	f.Close()
+
 	dsn := "file:" + (&url.URL{Path: path}).EscapedPath() + "?" + url.Values{
 		"_pragma": {"busy_timeout(60000)"},
 		"_txlock": {"immediate"},

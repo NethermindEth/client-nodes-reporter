@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -28,6 +29,22 @@ func TestOpenIsIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 		db.Close()
+	}
+}
+
+func TestOpenCreatesPrivateFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reporter.db")
+	db, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("database file mode = %o, want 600", perm)
 	}
 }
 

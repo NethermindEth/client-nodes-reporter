@@ -134,6 +134,8 @@ The reporter posts with a bot token and needs the `chat:write` scope (plus `chat
 
 On each run the reporter takes the token pair from the `slack_tokens` table and renews it when less than an hour is left, saving the new pair before it is used. The env refresh token only starts the chain: it is used on the first run, or when it changes. To re-seed (after a reinstall, or if the stored refresh token was revoked), put a new refresh token in the env.
 
+The database file then holds a live bot token (valid for up to 12 h) and the next refresh token, which cannot be used without the client secret. New database files are created with mode `0600`; keep the file, its volume and any backups as private as the client secret.
+
 Every process that uses the same app must share the same database file. Two files would each spend the other's refresh tokens. Processes sharing one file are safe: the renewal runs inside a write transaction, so only one of them refreshes.
 
 ## Data sources
