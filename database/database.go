@@ -41,6 +41,13 @@ var migrations = []string{
 		created_at       TEXT    NOT NULL,
 		UNIQUE (network, created_at)
 	);`,
+	`CREATE TABLE slack_tokens (
+		kind          TEXT PRIMARY KEY,
+		access_token  TEXT NOT NULL,
+		refresh_token TEXT NOT NULL,
+		expires_at    TEXT NOT NULL,
+		seed_sha256   TEXT NOT NULL
+	);`,
 }
 
 type DB struct {
@@ -52,7 +59,7 @@ type DB struct {
 // to the latest schema.
 func Open(ctx context.Context, path string) (*DB, error) {
 	dsn := "file:" + (&url.URL{Path: path}).EscapedPath() + "?" + url.Values{
-		"_pragma": {"busy_timeout(10000)"},
+		"_pragma": {"busy_timeout(60000)"},
 		"_txlock": {"immediate"},
 	}.Encode()
 

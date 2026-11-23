@@ -7,7 +7,6 @@ import (
 	"client-nodes-reporter/configs"
 	"client-nodes-reporter/database"
 	"client-nodes-reporter/datasources"
-	"client-nodes-reporter/notifier"
 
 	"github.com/spf13/cobra"
 )
@@ -42,10 +41,7 @@ func newStateSchemeCmd(common *RootCmdFlags) *cobra.Command {
 			}
 			defer db.Close()
 
-			slackNotifier, err := notifier.NewSlackNotifier(notifier.SlackNotifierOptions{
-				Token:   common.SlackAppToken,
-				Channel: common.SlackChannel,
-			})
+			slackNotifier, err := common.newSlackNotifier(ctx, db)
 			if err != nil {
 				return fmt.Errorf("failed to create slack notifier: %w", err)
 			}
