@@ -30,10 +30,8 @@ type RootCmdFlags struct {
 	// Client
 	Client string
 
-	// Notion DB
-	NotionDB string
-	// Notion Token
-	NotionToken string
+	// SQLite database file
+	DBPath string
 
 	// Slack App Token
 	SlackAppToken string
@@ -58,13 +56,6 @@ func (f *RootCmdFlags) Validate() error {
 		return fmt.Errorf("client is required")
 	}
 
-	if f.NotionDB == "" {
-		f.NotionDB = viper.GetString("notion_db")
-		if f.NotionDB == "" {
-			return fmt.Errorf("notion db id is required")
-		}
-	}
-
 	if err := f.validateCommon(); err != nil {
 		return err
 	}
@@ -77,11 +68,8 @@ func (f *RootCmdFlags) Validate() error {
 }
 
 func (f *RootCmdFlags) validateCommon() error {
-	if f.NotionToken == "" {
-		f.NotionToken = viper.GetString("notion_token")
-		if f.NotionToken == "" {
-			return fmt.Errorf("notion token is required")
-		}
+	if err := f.validateDB(); err != nil {
+		return err
 	}
 
 	if f.SlackAppToken == "" {
@@ -98,6 +86,16 @@ func (f *RootCmdFlags) validateCommon() error {
 		}
 	}
 
+	return nil
+}
+
+func (f *RootCmdFlags) validateDB() error {
+	if f.DBPath == "" {
+		f.DBPath = viper.GetString("db_path")
+		if f.DBPath == "" {
+			return fmt.Errorf("database path is required")
+		}
+	}
 	return nil
 }
 
@@ -180,16 +178,6 @@ func NewRootCmd() (*cobra.Command, error) {
 				return fmt.Errorf("invalid source: \"%s\"", flags.Source)
 			}
 
-			// Configure database
-			database, err := database.NewNotionDB(database.NotionDBOptions{
-				DatabaseID: flags.NotionDB,
-				Token:      flags.NotionToken,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to create notion db: %w", err)
-			}
-			ctx = context.WithValue(ctx, configs.ContextKeyDB, database)
-
 			// Configure slack notifier
 			slackNotifier, err := notifier.NewSlackNotifier(notifier.SlackNotifierOptions{
 				Token:   flags.SlackAppToken,
@@ -209,11 +197,16 @@ func NewRootCmd() (*cobra.Command, error) {
 			ctx := cmd.Context()
 			source := ctx.Value(configs.ContextKeySource).(datasources.DataSource)
 			logger := ctx.Value(configs.ContextKeyLogger).(*slog.Logger)
-			database := ctx.Value(configs.ContextKeyDB).(*database.NotionDB)
 			clientType := configs.ClientTypeFromString(flags.Client)
 			if clientType == configs.ClientTypeUnknown {
 				return fmt.Errorf("invalid client: %s", flags.Client)
 			}
+
+			db, err := database.Open(ctx, flags.DBPath)
+			if err != nil {
+				return err
+			}
+			defer db.Close()
 
 			// Updating data
 			if !flags.SkipUpdate {
@@ -234,7 +227,7 @@ func NewRootCmd() (*cobra.Command, error) {
 					"syncedPercentage", fmt.Sprintf("%.2f%%", float64(clientData.ClientSynced)/float64(clientData.ClientTotal)*100),
 				)
 
-				if err := database.AddClientData(clientData); err != nil {
+				if err := db.AddClientData(ctx, clientData); err != nil {
 					return fmt.Errorf("failed to insert client data: %w", err)
 				}
 
@@ -243,7 +236,7 @@ func NewRootCmd() (*cobra.Command, error) {
 
 			// Reporting data
 			logger.Info("Getting historical data for reporting")
-			historicalData, err := database.GetLatestData(flags.Client, 35, datasources.DataSourceType(flags.Source))
+			historicalData, err := db.GetLatestData(ctx, flags.Client, 35, datasources.DataSourceType(flags.Source))
 			if err != nil {
 				return fmt.Errorf("failed to get historical data: %w", err)
 			}
@@ -282,12 +275,8 @@ func NewRootCmd() (*cobra.Command, error) {
 	// Skip Update
 	rootCmd.PersistentFlags().BoolVar(&flags.SkipUpdate, "skip-update", false, "skip updating data")
 
-	// Notion DB
-	viper.BindEnv("notion_db")
-	rootCmd.Flags().StringVar(&flags.NotionDB, "notion-db", "", "notion db. environment variable: REPORTER_NOTION_DB")
-	// Notion Token
-	viper.BindEnv("notion_token")
-	rootCmd.PersistentFlags().StringVar(&flags.NotionToken, "notion-token", "", "notion token. environment variable: REPORTER_NOTION_TOKEN")
+	viper.BindEnv("db_path")
+	rootCmd.PersistentFlags().StringVar(&flags.DBPath, "db-path", "", "SQLite database file, created if missing. environment variable: REPORTER_DB_PATH")
 
 	// Slack App Token
 	viper.BindEnv("slack_app_token")
@@ -305,7 +294,7 @@ func NewRootCmd() (*cobra.Command, error) {
 	rootCmd.PersistentFlags().IntVar(&flags.MaxRetries, "max-retries", 3, "maximum number of retries for operations")
 	rootCmd.PersistentFlags().DurationVar(&flags.InitialRetryDelay, "retry-delay", time.Second, "initial delay between retry attempts")
 
-	rootCmd.AddCommand(newStateSchemeCmd(flags))
+	rootCmd.AddCommand(newStateSchemeCmd(flags), newImportNotionCSVCmd(flags))
 
 	return rootCmd, nil
 }
