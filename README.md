@@ -84,6 +84,28 @@ reporter import-notion-csv --db-path reporter.db --table state-scheme --timezone
 
 Notion writes `Created time` in the exporting user's timezone without saying which, so pass that zone as `--timezone` (default `UTC`). Rows already in the database are skipped, so the import can be re-run.
 
+Every file is parsed before anything is written, so a malformed file imports nothing. Check an export first with `--dry-run`, which reports the row count and the first and last `Created time` without touching the database:
+
+```sh
+reporter import-notion-csv --dry-run --table client-data --timezone Europe/Madrid clients.csv
+```
+
+`-` reads the CSV from stdin. That makes a one-off import into a Kubernetes volume possible without copying files into the distroless image, which has no shell. Run it while no report is running, from a temporary pod that mounts the reporter's PVC and is deleted afterwards:
+
+```sh
+kubectl -n <namespace> run reporter-import --rm -i --restart=Never \
+  --image=ghcr.io/nethermindeth/client-nodes-reporter:main \
+  --overrides='{"spec":{"securityContext":{"fsGroup":65532},
+    "volumes":[{"name":"data","persistentVolumeClaim":{"claimName":"<pvc>"}}],
+    "containers":[{"name":"reporter-import","image":"ghcr.io/nethermindeth/client-nodes-reporter:main",
+      "stdin":true,"stdinOnce":true,
+      "args":["import-notion-csv","--db-path","/data/reporter.db","--table","client-data","--timezone","Europe/Madrid","-"],
+      "volumeMounts":[{"name":"data","mountPath":"/data"}]}]}}' \
+  < clients.csv
+```
+
+Repeat with `--table state-scheme` for the state-scheme export.
+
 ## Cloudflare workaround (FlareSolverr)
 
 `ethernodes.org` sits behind Cloudflare, which can return `HTTP 403` to direct requests from datacenter IPs or any client whose TLS fingerprint and header order don't look like a real browser. The scraper detects this and fails loudly rather than parsing garbage.
