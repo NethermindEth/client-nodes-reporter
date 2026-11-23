@@ -7,17 +7,14 @@ import (
 	"client-nodes-reporter/configs"
 	"client-nodes-reporter/database"
 	"client-nodes-reporter/datasources"
-	"client-nodes-reporter/notifier"
 
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
 
 const stateSchemeHistorySize = 35
 
 type stateSchemeCmdFlags struct {
-	NotionDB string
-	Network  string
+	Network string
 }
 
 func newStateSchemeCmd(common *RootCmdFlags) *cobra.Command {
@@ -28,13 +25,6 @@ func newStateSchemeCmd(common *RootCmdFlags) *cobra.Command {
 		Short: "Report Nethermind v2 state scheme adoption (halfpath vs flat) from enrscout",
 		Args:  cobra.NoArgs,
 		PreRunE: func(cmd *cobra.Command, args []string) error {
-			if flags.NotionDB == "" {
-				flags.NotionDB = viper.GetString("state_scheme_notion_db")
-				if flags.NotionDB == "" {
-					return fmt.Errorf("state scheme notion db id is required")
-				}
-			}
-
 			if flags.Network == "" {
 				return fmt.Errorf("network is required")
 			}
@@ -45,18 +35,13 @@ func newStateSchemeCmd(common *RootCmdFlags) *cobra.Command {
 			ctx := cmd.Context()
 			logger := ctx.Value(configs.ContextKeyLogger).(*slog.Logger)
 
-			db, err := database.NewNotionDB(database.NotionDBOptions{
-				DatabaseID: flags.NotionDB,
-				Token:      common.NotionToken,
-			})
+			db, err := database.Open(ctx, common.DBPath)
 			if err != nil {
-				return fmt.Errorf("failed to create notion db: %w", err)
+				return err
 			}
+			defer db.Close()
 
-			slackNotifier, err := notifier.NewSlackNotifier(notifier.SlackNotifierOptions{
-				Token:   common.SlackAppToken,
-				Channel: common.SlackChannel,
-			})
+			slackNotifier, err := common.newSlackNotifier(ctx, db)
 			if err != nil {
 				return fmt.Errorf("failed to create slack notifier: %w", err)
 			}
@@ -99,14 +84,14 @@ func newStateSchemeCmd(common *RootCmdFlags) *cobra.Command {
 					"snapshotAt", snapshot.SnapshotAt,
 				)
 
-				if err := db.AddStateSchemeSnapshot(snapshot); err != nil {
+				if err := db.AddStateSchemeSnapshot(ctx, snapshot); err != nil {
 					return fmt.Errorf("failed to insert state scheme data: %w", err)
 				}
 				logger.Info("State scheme data added successfully")
 			}
 
 			logger.Info("Getting historical state scheme data for reporting")
-			history, err := db.GetLatestStateSchemeSnapshots(flags.Network, stateSchemeHistorySize)
+			history, err := db.GetLatestStateSchemeSnapshots(ctx, flags.Network, stateSchemeHistorySize)
 			if err != nil {
 				return fmt.Errorf("failed to get historical state scheme data: %w", err)
 			}
@@ -122,8 +107,6 @@ func newStateSchemeCmd(common *RootCmdFlags) *cobra.Command {
 		},
 	}
 
-	viper.BindEnv("state_scheme_notion_db")
-	cmd.Flags().StringVar(&flags.NotionDB, "notion-db", "", "notion db for state scheme snapshots. environment variable: REPORTER_STATE_SCHEME_NOTION_DB")
 	cmd.Flags().StringVar(&flags.Network, "network", "mainnet", "enrscout network (mainnet, hoodi, sepolia)")
 
 	return cmd

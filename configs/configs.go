@@ -6,11 +6,9 @@ import "strings"
 type ContextKey string
 
 const (
-	ContextKeyDebug    ContextKey = "debug"
-	ContextKeyLogger   ContextKey = "logger"
-	ContextKeySource   ContextKey = "source"
-	ContextKeyDB       ContextKey = "database"
-	ContextKeyNotifier ContextKey = "notifier"
+	ContextKeyDebug  ContextKey = "debug"
+	ContextKeyLogger ContextKey = "logger"
+	ContextKeySource ContextKey = "source"
 )
 
 // Clients
