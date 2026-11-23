@@ -3,7 +3,7 @@
 A small Go CLI that:
 
 1. Scrapes Ethereum execution-layer client distribution data (currently from [ethernodes.org](https://ethernodes.org)),
-2. Records one row per run in a Notion database,
+2. Records one row per run in a local SQLite database,
 3. Posts a Slack message summarising today's count and a 35-day trend chart (rendered via QuickChart).
 
 It is designed to be run as a one-shot job — locally, in a container, or via any scheduler (GitHub Actions, Kubernetes CronJob, systemd timer, plain cron, etc.).
@@ -12,7 +12,7 @@ It is designed to be run as a one-shot job — locally, in a container, or via a
 
 - `cmd/` — Cobra root command, flag parsing, wiring.
 - `datasources/` — implementations of the `DataSource` interface that scrape upstream sites.
-- `database/` — Notion read/write (`AddClientData`, `GetLatestData`).
+- `database/` — SQLite storage (`AddClientData`, `GetLatestData`, state-scheme snapshots) and the Notion CSV importer.
 - `notifier/` — Slack message + QuickChart line graph.
 - `configs/` — client-type enum (Nethermind, Geth, Besu, Erigon, Reth).
 
@@ -26,9 +26,8 @@ All settings can be provided as a flag or as an environment variable.
 | `--client`, `-c` | — | `nethermind` | `nethermind`, `geth`, `besu`, `erigon`, `reth` |
 | `--debug`, `-d` | — | `false` | sets log level to debug |
 | `--log-format`, `-f` | `REPORTER_LOG_FORMAT` | `json` | `json` or `text` |
-| `--skip-update` | — | `false` | skip scraping and Notion write; only read history and post to Slack |
-| `--notion-db` | `REPORTER_NOTION_DB` | — | **required** — Notion database ID |
-| `--notion-token` | `REPORTER_NOTION_TOKEN` | — | **required** — Notion integration token |
+| `--skip-update` | — | `false` | skip scraping and the database write; only read history and post to Slack |
+| `--db-path` | `REPORTER_DB_PATH` | — | **required** — SQLite database file; created and migrated on first use |
 | `--slack-app-token` | `REPORTER_SLACK_APP_TOKEN` | — | **required** — Slack bot token |
 | `--slack-channel` | `REPORTER_SLACK_CHANNEL` | — | **required** — channel name or ID |
 | `--flaresolverr-url` | `REPORTER_FLARESOLVERR_URL` | — | optional — FlareSolverr v1 endpoint (e.g. `http://localhost:8191/v1`). When set, all ethernodes fetches are proxied through it. See [Cloudflare workaround](#cloudflare-workaround-flaresolverr). |
@@ -44,23 +43,43 @@ export $(grep -v '^#' .env | xargs)
 go run main.go --debug --client nethermind --source ethernodes
 ```
 
-Use `--skip-update` to avoid writing to Notion while still posting the Slack report (useful for chart-only re-runs).
+Use `--skip-update` to avoid writing to the database while still posting the Slack report (useful for chart-only re-runs).
 
 ## Running locally — Docker
 
+The image runs as the distroless `nonroot` user (UID 65532), so the directory holding the database must be writable by it.
+
 ```sh
+mkdir -p data && sudo chown 65532 data
 docker build -t client-nodes-reporter:local .
-docker run --rm --env-file .env client-nodes-reporter:local \
-  --debug --client nethermind --source ethernodes
+docker run --rm --env-file .env -v "$PWD/data:/data" -e REPORTER_DB_PATH=/data/reporter.db \
+  client-nodes-reporter:local --debug --client nethermind --source ethernodes
 ```
 
 Or, with the published image:
 
 ```sh
-docker run --rm --env-file .env \
+docker run --rm --env-file .env -v "$PWD/data:/data" -e REPORTER_DB_PATH=/data/reporter.db \
   ghcr.io/nethermindeth/client-nodes-reporter:latest \
   --client nethermind --source ethernodes
 ```
+
+## Storage
+
+All history lives in one SQLite file (`--db-path`), with a table per report: `client_data` for the ethernodes/ethernets reports and `state_scheme_snapshots` for `nethermind-state-scheme`. The schema is migrated automatically on start (tracked with `PRAGMA user_version`). The reports chart the last 35 rows, so the file has to survive between runs: keep it on a persistent volume and back it up like any other state.
+
+Several report types can share one file, but SQLite needs a filesystem with working locks: don't put it on NFS or another network filesystem, and don't open it from more than one host.
+
+### Importing history from Notion
+
+Earlier versions stored rows in Notion. Export each Notion database as CSV (`•••` → `Export` → `Markdown & CSV`) and import it:
+
+```sh
+reporter import-notion-csv --db-path reporter.db --table client-data --timezone Europe/Madrid clients.csv
+reporter import-notion-csv --db-path reporter.db --table state-scheme --timezone Europe/Madrid state-scheme.csv
+```
+
+Notion writes `Created time` in the exporting user's timezone without saying which, so pass that zone as `--timezone` (default `UTC`). Rows already in the database are skipped, so the import can be re-run.
 
 ## Cloudflare workaround (FlareSolverr)
 
@@ -83,14 +102,19 @@ docker stop flaresolverr
 
 ## Running on a schedule
 
-The binary is a one-shot, so any scheduler that can run a container or a binary once a day works. The repo includes one example: `.github/workflows/ethernodes-scrape.yml`, a GitHub Actions workflow that brings up a FlareSolverr service container next to the scraper and triggers the published image on a daily cron (also triggerable manually with a `skip-update` toggle).
+The binary is a one-shot, so any scheduler that can run a container or a binary once a day works. The repo includes one example: `.github/workflows/ethernodes-scrape.yml`, a manually triggered GitHub Actions workflow that brings up a FlareSolverr service container next to the scraper and keeps the SQLite file in the Actions cache between runs. The cache is evicted after 7 days without use, so treat that example as a demo, not durable storage.
 
 For other schedulers (Kubernetes CronJob, systemd timer, plain cron) the recipe is the same:
 
 1. Make sure a FlareSolverr instance is reachable from wherever the binary runs (sidecar container, peer pod, separate host).
-2. Provide the four `REPORTER_*` secrets via env or `.env`.
-3. Set `REPORTER_FLARESOLVERR_URL` to the FlareSolverr `/v1` endpoint.
-4. Invoke the binary or the published image once per day.
+2. Provide `REPORTER_SLACK_APP_TOKEN` and `REPORTER_SLACK_CHANNEL` via env or `.env`.
+3. Point `REPORTER_DB_PATH` at a file on persistent storage (for a Kubernetes CronJob, a PersistentVolumeClaim with `fsGroup: 65532` on the pod).
+4. Set `REPORTER_FLARESOLVERR_URL` to the FlareSolverr `/v1` endpoint.
+5. Invoke the binary or the published image once per day.
+
+## Slack app
+
+The reporter posts with a bot token (`xoxb-…`) and needs the `chat:write` scope (plus `chat:write.public` to post in channels the bot has not joined). It reads the token once per run and does not refresh it, so use a Slack app **without** token rotation. Rotating tokens expire every 12 h and each refresh token works only once; if another service owns the same app and renews its tokens, the reporter cannot share them safely. Give the reporter its own Slack app instead.
 
 ## Data sources
 
@@ -110,7 +134,7 @@ For other schedulers (Kubernetes CronJob, systemd timer, plain cron) the recipe 
 
 ## Nethermind state-scheme report
 
-`reporter nethermind-state-scheme` is a separate, Nethermind-specific subcommand that tracks how the Nethermind execution-layer fleet is moving from pre-v2 releases to v2, and on v2, how many nodes run the halfpath vs the flat state scheme. It reads node data from the public [enrscout](https://enrscout.ethnodeops.xyz) API, stores one row per run in its own Notion database, and posts a Slack summary table with a stacked bar chart of node counts per bucket over time.
+`reporter nethermind-state-scheme` is a separate, Nethermind-specific subcommand that tracks how the Nethermind execution-layer fleet is moving from pre-v2 releases to v2, and on v2, how many nodes run the halfpath vs the flat state scheme. It reads node data from the public [enrscout](https://enrscout.ethnodeops.xyz) API, stores one row per run in the `state_scheme_snapshots` table, and posts a Slack summary table with a stacked bar chart of node counts per bucket over time.
 
 Nodes are grouped by `client_version`:
 
@@ -124,27 +148,14 @@ Nodes are grouped by `client_version`:
 Every node enrscout lists is counted. Nodes whose fingerprint is not fresh (`fp_status != ok`) are also counted separately as `Stale`. enrscout's methodology version is stored with each row, and the Slack message warns when it changes between runs.
 
 ```sh
-REPORTER_STATE_SCHEME_NOTION_DB=<database id> \
-  go run main.go nethermind-state-scheme --debug --log-format text
+REPORTER_DB_PATH=reporter.db go run main.go nethermind-state-scheme --debug --log-format text
 ```
 
-The subcommand shares `--notion-token`, `--slack-app-token`, `--slack-channel`, `--max-retries`, `--retry-delay`, `--skip-update`, `--debug` and `--log-format` with the root command, and adds:
+The subcommand shares `--db-path`, `--slack-app-token`, `--slack-channel`, `--max-retries`, `--retry-delay`, `--skip-update`, `--debug` and `--log-format` with the root command, and adds:
 
 | Flag | Env var | Default | Notes |
 |---|---|---|---|
-| `--notion-db` | `REPORTER_STATE_SCHEME_NOTION_DB` | — | **required** — must be a different database from `REPORTER_NOTION_DB` |
 | `--network` | — | `mainnet` | `mainnet`, `hoodi` or `sepolia` |
-
-The Notion database needs these properties (names and types must match), and it must be shared with the integration:
-
-| Property | Type |
-|---|---|
-| `Name` | Title |
-| `Network` | Select |
-| `Total`, `Pre V2`, `V2 Halfpath`, `V2 Flat`, `V2 Other`, `Stale`, `Network EL Total` | Number |
-| `Methodology` | Text |
-| `Snapshot At` | Date |
-| `Created time` | Created time |
 
 Charts are uploaded via QuickChart's `/chart/create` endpoint, because the inline URL for this many series is longer than Slack's image URL limit.
 

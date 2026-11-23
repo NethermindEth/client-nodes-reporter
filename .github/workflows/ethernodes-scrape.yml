@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       skip-update:
-        description: Skip Notion write; only post a Slack message from cached history
+        description: Skip the database write; only post a Slack message from stored history
         type: boolean
         default: false
 
@@ -40,6 +40,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Restore database
+        uses: actions/cache/restore@v4
+        with:
+          path: data
+          key: reporter-db-${{ matrix.client }}-${{ github.run_id }}
+          restore-keys: reporter-db-${{ matrix.client }}-
+
+      - name: Make database directory writable by the nonroot image user
+        run: mkdir -p data && sudo chown -R 65532 data
+
       - name: Wait for FlareSolverr to be ready
         run: |
           for i in $(seq 1 30); do
@@ -54,22 +64,28 @@ jobs:
 
       - name: Run client-nodes-reporter (${{ matrix.client }})
         env:
-          REPORTER_NOTION_DB: ${{ secrets.REPORTER_NOTION_DB }}
-          REPORTER_NOTION_TOKEN: ${{ secrets.REPORTER_NOTION_TOKEN }}
           REPORTER_SLACK_APP_TOKEN: ${{ secrets.REPORTER_SLACK_APP_TOKEN }}
           REPORTER_SLACK_CHANNEL: core-budget-alerts
           REPORTER_FLARESOLVERR_URL: http://localhost:8191/v1
+          REPORTER_DB_PATH: /data/reporter.db
           SKIP_UPDATE_FLAG: ${{ inputs.skip-update == true && '--skip-update' || '' }}
         run: |
           docker run --rm \
             --network=host \
-            -e REPORTER_NOTION_DB \
-            -e REPORTER_NOTION_TOKEN \
             -e REPORTER_SLACK_APP_TOKEN \
             -e REPORTER_SLACK_CHANNEL \
             -e REPORTER_FLARESOLVERR_URL \
+            -e REPORTER_DB_PATH \
+            -v "$PWD/data:/data" \
             ghcr.io/nethermindeth/client-nodes-reporter:latest \
             --debug \
             --source ethernodes \
             --client ${{ matrix.client }} \
             $SKIP_UPDATE_FLAG
+
+      - name: Save database
+        if: inputs.skip-update != true
+        uses: actions/cache/save@v4
+        with:
+          path: data
+          key: reporter-db-${{ matrix.client }}-${{ github.run_id }}
