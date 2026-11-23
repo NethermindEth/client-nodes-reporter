@@ -86,6 +86,8 @@ func TestParseNotionTime(t *testing.T) {
 		{"November 3, 2026", time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)},
 		{"November 3, 2026 9:05 PM (America/New_York)", time.Date(2026, 11, 4, 2, 5, 0, 0, time.UTC)},
 		{"November 3, 2026 9:05 PM → November 4, 2026 9:05 PM", time.Date(2026, 11, 3, 21, 5, 0, 0, time.UTC)},
+		{"November 3, 2026 9:05 PM (GMT-4)", time.Date(2026, 11, 4, 1, 5, 0, 0, time.UTC)},
+		{"November 3, 2026 9:05 PM (UTC+5:30)", time.Date(2026, 11, 3, 15, 35, 0, 0, time.UTC)},
 		{"2026-11-03T21:05:00Z", time.Date(2026, 11, 3, 21, 5, 0, 0, time.UTC)},
 	}
 	for _, c := range cases {

@@ -4,6 +4,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -85,6 +86,33 @@ func (t *csvTable) time(row []string, column string, loc *time.Location) (time.T
 	return parseNotionTime(t.get(row, column), loc)
 }
 
+// Notion names zones either by IANA name or as a fixed offset, e.g. "GMT-4" or "GMT+5:30".
+var notionOffsetZone = regexp.MustCompile(`^(?:GMT|UTC)([+-])(\d{1,2})(?::?(\d{2}))?$`)
+
+func notionZone(zone string) (*time.Location, error) {
+	switch zone {
+	case "UTC", "GMT":
+		return time.UTC, nil
+	}
+	if m := notionOffsetZone.FindStringSubmatch(zone); m != nil {
+		hours, _ := strconv.Atoi(m[2])
+		minutes := 0
+		if m[3] != "" {
+			minutes, _ = strconv.Atoi(m[3])
+		}
+		offset := hours*3600 + minutes*60
+		if m[1] == "-" {
+			offset = -offset
+		}
+		return time.FixedZone(zone, offset), nil
+	}
+	loc, err := time.LoadLocation(zone)
+	if err != nil {
+		return nil, fmt.Errorf("timezone %q: %w", zone, err)
+	}
+	return loc, nil
+}
+
 // parseNotionTime parses a Notion export date. A trailing "(Zone)" suffix,
 // which Notion adds to dates with an explicit timezone, overrides loc.
 func parseNotionTime(raw string, loc *time.Location) (time.Time, error) {
@@ -95,16 +123,11 @@ func parseNotionTime(raw string, loc *time.Location) (time.Time, error) {
 	if start := strings.LastIndex(raw, " ("); start != -1 && strings.HasSuffix(raw, ")") {
 		zone := raw[start+2 : len(raw)-1]
 		raw = raw[:start]
-		switch zone {
-		case "UTC", "GMT":
-			loc = time.UTC
-		default:
-			z, err := time.LoadLocation(zone)
-			if err != nil {
-				return time.Time{}, fmt.Errorf("timezone %q: %w", zone, err)
-			}
-			loc = z
+		z, err := notionZone(zone)
+		if err != nil {
+			return time.Time{}, err
 		}
+		loc = z
 	}
 	// Notion separates a date range with an arrow; keep the start.
 	raw, _, _ = strings.Cut(raw, " → ")
